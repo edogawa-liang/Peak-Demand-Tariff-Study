@@ -2,3 +2,7 @@ data/
 mock_data/
 gar/
 src/__pycache__/
+.gitignore
+txt/
+note.txt
+*.txt

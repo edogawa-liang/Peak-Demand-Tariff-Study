@@ -18,6 +18,9 @@ class ElectricityAggregator:
             "month": "M",
             "quarter": "Q",
             "year": "Y",
+            "hour": "hour",
+            "week_part": "week_part",
+            "weekday": "weekday",
         }
 
         print(f"Loaded {len(self.df):,} rows")
@@ -57,7 +60,7 @@ class ElectricityAggregator:
         )
 
     ############################################
-    # user usage group
+    # user usage group: Base on entire data period
     ############################################
 
     def _create_usage_group(self):
@@ -188,12 +191,30 @@ class ElectricityAggregator:
         df = df.copy()
 
         freq = self.freq_map[self.freq]
-        df["period"] = df["TIDPUNKT"].dt.to_period(freq).dt.to_timestamp()
+
+        # hourly load profile
+        if freq == "hour":
+            df["period"] = df["TIDPUNKT"].dt.hour
+
+        # weekday vs weekend
+        elif freq == "week_part":
+            df["period"] = np.where(
+                df["TIDPUNKT"].dt.weekday < 5,
+                "weekday",
+                "weekend",
+            )
+
+        elif freq == "weekday":
+            df["period"] = df["TIDPUNKT"].dt.weekday
+            
+        # monthly trend
+        else:
+            df["period"] = df["TIDPUNKT"].dt.to_period(freq).dt.to_timestamp()
 
         # Ensure price column according to use_price mode
         df = self._apply_price_mode(df)
 
-        group_cols = ["aID", "period", "price"]
+        group_cols = ["aID", "period", "price", "tariff_active"]
 
         # normalize agg_methods to list
         methods = self.agg_methods
@@ -216,15 +237,21 @@ class ElectricityAggregator:
         return result
 
     def _attach_tariff_info(self, result: pd.DataFrame) -> pd.DataFrame:
+
         if "tariff_start" not in self.df.columns:
             return result
 
-        tariff_info = self.df[["aID", "tariff_start", "tariff_plan"]].drop_duplicates("aID")
+        tariff_info = (
+            self.df[["aID", "tariff_start", "tariff_plan"]]
+            .drop_duplicates("aID")
+        )
 
-        result = result.merge(tariff_info, on="aID", how="left", sort=False)
-
-        # active if period start >= tariff_start (works because TIDPUNKT is period start)
-        result["tariff_active"] = (result["TIDPUNKT"] >= result["tariff_start"]).astype(int)
+        result = result.merge(
+            tariff_info,
+            on="aID",
+            how="left",
+            sort=False
+        )
 
         return result
 
@@ -274,13 +301,13 @@ class ElectricityAggregator:
             self.agg_methods = list(agg_method)
 
         # tariff
-        if self.tariff_df is not None:
+        if self.tariff_df is not None and "tariff_start" not in self.df.columns:
             t = time.time()
             self._merge_tariff()
             print(f"Tariff merge done ({time.time()-t:.2f}s)")
 
         # usage groups
-        if add_user_group_col is not None:
+        if add_user_group_col is not None and "usage_group" not in self.df.columns:
             t = time.time()
             self._create_usage_group()
             print(f"Usage groups created ({time.time()-t:.2f}s)")

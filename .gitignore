@@ -1,3 +1,4 @@
 data/
 mock_data/
 gar/
+src/__pycache__/

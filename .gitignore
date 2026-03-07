@@ -6,3 +6,5 @@ src/__pycache__/
 txt/
 note.txt
 *.txt
+*_spark*
+try.ipynb

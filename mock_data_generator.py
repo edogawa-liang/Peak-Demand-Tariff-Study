@@ -147,7 +147,7 @@ def generate_mock_data_all(
 
     with open(tariff_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["Produktnamn", "Startdatum", "GS1-nr"])
+        w.writerow(["Produktnamn", "Startdatum", "GS1-nr."])
 
         for aid in tariff_households:
             chosen_month = int(rng.choice(months, p=weights))

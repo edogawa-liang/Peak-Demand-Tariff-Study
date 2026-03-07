@@ -37,7 +37,7 @@ class ElectricityAggregator:
 
         tariff = self.tariff_df.rename(
             columns={
-                "GS1-nr": "aID",
+                "GS1-nr.": "aID",
                 "Startdatum": "tariff_start",
                 "Produktnamn": "tariff_plan",
             }

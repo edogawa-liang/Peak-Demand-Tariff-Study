@@ -10,13 +10,14 @@ def plot_monthly_adoption(tariff_df):
     df = tariff_df.copy()
     df["Startdatum"] = pd.to_datetime(df["Startdatum"])
 
+    df["month"] = df["Startdatum"].dt.to_period("M").dt.to_timestamp()
+
     monthly = (
-        df.groupby(df["Startdatum"].dt.to_period("M"))["GS1-nr"]
+        df.groupby("month")["GS1-nr."]
         .nunique()
         .sort_index()
     )
-
-    monthly.index = monthly.index.to_timestamp()
+    monthly.index = monthly.index.strftime("%Y-%m")
 
     plt.figure()
     ax = monthly.plot(kind="bar")
@@ -24,8 +25,7 @@ def plot_monthly_adoption(tariff_df):
     plt.title("Monthly Tariff Adoption")
     plt.ylabel("Households")
     plt.xlabel("Month")
-
-    ax.set_xticklabels(monthly.index.strftime("%Y-%m"), rotation=30)
+    plt.xticks(rotation=30)
 
     return ax
 
@@ -36,18 +36,24 @@ def plot_monthly_share(tariff_df, total_households):
     df = tariff_df.copy()
     df["Startdatum"] = pd.to_datetime(df["Startdatum"])
 
+    df["month"] = df["Startdatum"].dt.to_period("M").dt.to_timestamp()
+
     monthly = (
-        df.groupby(df["Startdatum"].dt.to_period("M"))["GS1-nr"]
+        df.groupby("month")["GS1-nr."]
         .nunique()
         .sort_index()
     )
 
-    full_index = pd.period_range(monthly.index.min(), monthly.index.max(), freq="M")
+    full_index = pd.date_range(
+        monthly.index.min(),
+        monthly.index.max(),
+        freq="MS"
+    )
+
     monthly = monthly.reindex(full_index, fill_value=0)
 
     cumulative = monthly.cumsum()
     share = cumulative / total_households
-    share.index = share.index.astype(str)
 
     plt.figure()
     ax = share.plot(marker="o")
@@ -56,7 +62,7 @@ def plot_monthly_share(tariff_df, total_households):
     plt.ylabel("Share of households")
     plt.xlabel("Month")
 
-    plt.xticks(rotation=30)
+    ax.set_xticklabels(share.index.strftime("%Y-%m"), rotation=30)
 
     return ax
 
@@ -99,22 +105,25 @@ def plot_tariff_group_cumulative(tariff_df):
 
     df["Startdatum"] = pd.to_datetime(df["Startdatum"])
 
+    df["month"] = df["Startdatum"].dt.to_period("M").dt.to_timestamp()
+
     monthly = (
-        df.groupby(
-            [df["Startdatum"].dt.to_period("M"), "tariff_group"]
-        )["GS1-nr"]
+        df.groupby(["month", "tariff_group"])["GS1-nr."]
         .nunique()
         .unstack()
         .fillna(0)
         .sort_index()
     )
 
-    # Align missing months with 0 counts
-    full_index = pd.period_range(monthly.index.min(), monthly.index.max(), freq="M")
+    full_index = pd.date_range(
+        monthly.index.min(),
+        monthly.index.max(),
+        freq="MS"
+    )
+
     monthly = monthly.reindex(full_index, fill_value=0)
 
     cumulative = monthly.cumsum()
-    cumulative.index = cumulative.index.astype(str)
 
     plt.figure()
     ax = cumulative.plot(marker="o")
@@ -123,7 +132,7 @@ def plot_tariff_group_cumulative(tariff_df):
     plt.ylabel("Households")
     plt.xlabel("Month")
 
-    plt.xticks(rotation=30)
+    ax.set_xticklabels(cumulative.index.strftime("%Y-%m"), rotation=30)
 
     ax.legend(title=None)
 

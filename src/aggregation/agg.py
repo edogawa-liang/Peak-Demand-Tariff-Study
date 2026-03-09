@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 import time
+import holidays
+
 
 
 class ElectricityAggregator:
@@ -100,12 +102,28 @@ class ElectricityAggregator:
 
     def _add_price_period(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
+
         ts = df["TIDPUNKT"]
-        df["price"] = np.where(
-            (ts.dt.weekday < 5) & (ts.dt.hour.between(7, 19)),
-            "high",
-            "low",
+
+        # Sweden public holidays
+        se_holidays = holidays.country_holidays("SE")
+
+        is_holiday = ts.dt.date.isin(se_holidays)
+        is_weekend = ts.dt.weekday >= 5
+        is_winter = ts.dt.month.isin([11, 12, 1, 2, 3])
+        is_weekday = ts.dt.weekday < 5
+        is_peak_hour = ts.dt.hour.between(7, 19)  # 07–20
+
+        high_price = (
+            is_winter
+            & is_weekday
+            & is_peak_hour
+            & ~is_weekend
+            & ~is_holiday
         )
+
+        df["price"] = np.where(high_price, "high", "low")
+
         return df
 
     def _apply_price_mode(self, df: pd.DataFrame) -> pd.DataFrame:

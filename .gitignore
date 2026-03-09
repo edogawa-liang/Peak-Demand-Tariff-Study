@@ -8,3 +8,5 @@ note.txt
 *.txt
 *_spark*
 try.ipynb
+__pycache__/
+*.pyc

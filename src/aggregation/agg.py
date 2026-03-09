@@ -71,11 +71,18 @@ class ElectricityAggregator:
 
         print("Creating usage groups...")
 
-        usage = self.df.groupby("aID", sort=False)["FORBRUKNING_KWH"].sum()
-        q = usage.quantile(self.user_group_col)
+        # total consumption per household
+        usage = (
+            self.df.groupby("aID", sort=False)["FORBRUKNING_KWH"]
+            .sum()
+            .rename("total_consumption")
+        )
 
-        # safety: if quantiles equal, pd.cut can fail
+        # quantile thresholds
+        q = usage.quantile(self.user_group_col)
         q1, q2 = float(q.iloc[0]), float(q.iloc[1])
+
+        # create usage group
         if q2 <= q1:
             usage_group = pd.cut(
                 usage,
@@ -91,10 +98,20 @@ class ElectricityAggregator:
                 include_lowest=True,
             )
 
-        usage_group = usage_group.reset_index()
-        usage_group.columns = ["aID", "usage_group"]
+        # combine total_consumption + usage_group
+        usage_df = pd.concat(
+            [usage, usage_group.rename("usage_group")],
+            axis=1
+        ).reset_index()
 
-        self.df = self.df.merge(usage_group, on="aID", how="left", sort=False)
+        # merge back to main dataframe
+        self.df = self.df.merge(
+            usage_df,
+            on="aID",
+            how="left",
+            sort=False
+        )
+        
 
     ############################################
     # price period
@@ -277,7 +294,10 @@ class ElectricityAggregator:
         if "usage_group" not in self.df.columns:
             return result
 
-        usage_info = self.df[["aID", "usage_group"]].drop_duplicates("aID")
+        usage_info = self.df[
+            ["aID", "total_consumption", "usage_group"]
+        ].drop_duplicates("aID")
+        
         return result.merge(usage_info, on="aID", how="left", sort=False)
 
     def get_data(self) -> pd.DataFrame:

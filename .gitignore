@@ -9,4 +9,4 @@ note.txt
 *_spark*
 try.ipynb
 __pycache__/
-*.pyc
+*.pycc

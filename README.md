@@ -5,7 +5,7 @@ The project processes raw electricity meter data, aggregates consumption statist
 
 ---
 
-# Project Structure
+## Project Structure
 
 ```
 Peak-Demand-Tariff-Study

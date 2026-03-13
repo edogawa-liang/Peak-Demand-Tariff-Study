@@ -10,3 +10,11 @@ note.txt
 try.ipynb
 __pycache__/
 *.pycc
+output/
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+.ipynb_checkpoints
+.DS_Store
+Thumbs.db

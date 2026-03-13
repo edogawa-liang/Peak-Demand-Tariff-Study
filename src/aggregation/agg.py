@@ -201,15 +201,54 @@ class ElectricityAggregator:
 
         # top3_mean
         if method == "top3_mean":
-            out = (
-                df.groupby(group_cols)["FORBRUKNING_KWH"]
-                .nlargest(3)
-                .groupby(group_cols)
-                .mean()
-                .reset_index()
+
+            temp = df.copy()
+            temp["date"] = temp["TIDPUNKT"].dt.date
+
+            # Step 1: daily maximum peak hour
+            daily_peak = (
+                temp.loc[
+                    temp.groupby(group_cols + ["date"])["FORBRUKNING_KWH"].idxmax()
+                ]
+                .copy()
             )
-            out = out.rename(columns={"FORBRUKNING_KWH": f"{method}_consumption"})
-            return out
+
+            # Step 2: sort by consumption
+            daily_peak = daily_peak.sort_values(
+                group_cols + ["FORBRUKNING_KWH"],
+                ascending=[True]*len(group_cols) + [False]
+            )
+
+            # Step 3: take top 3 days
+            top3 = daily_peak.groupby(group_cols).head(3).copy()
+
+            # Step 4: ranking
+            top3["rank"] = top3.groupby(group_cols).cumcount() + 1
+
+            # Step 5: pivot
+            pivot = top3.pivot_table(
+                index=group_cols,
+                columns="rank",
+                values=["TIDPUNKT", "FORBRUKNING_KWH"],
+                aggfunc="first"
+            )
+
+            pivot.columns = [
+                f"peak{c[1]}_time" if c[0] == "TIDPUNKT"
+                else f"peak{c[1]}_consumption"
+                for c in pivot.columns
+            ]
+
+            pivot = pivot.reset_index()
+
+            # Step 6: compute mean
+            pivot["top3_mean_consumption"] = (
+                pivot[
+                    ["peak1_consumption", "peak2_consumption", "peak3_consumption"]
+                ].mean(axis=1)
+            )
+
+            return pivot
 
         raise ValueError(f"Unknown aggregation method: {method}")
 
@@ -279,6 +318,12 @@ class ElectricityAggregator:
         tariff_info = (
             self.df[["aID", "tariff_start", "tariff_plan"]]
             .drop_duplicates("aID")
+            .copy()
+        )
+
+        # extract tariff group
+        tariff_info["tariff_plan"] = tariff_info["tariff_plan"].str.extract(
+            r'(\d+\s*kW\s*(?:Villa|Normal))'
         )
 
         result = result.merge(
@@ -297,7 +342,7 @@ class ElectricityAggregator:
         usage_info = self.df[
             ["aID", "total_consumption", "usage_group"]
         ].drop_duplicates("aID")
-        
+
         return result.merge(usage_info, on="aID", how="left", sort=False)
 
     def get_data(self) -> pd.DataFrame:

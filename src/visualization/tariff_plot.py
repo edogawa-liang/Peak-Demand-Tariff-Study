@@ -72,9 +72,7 @@ def plot_tariff_group_counts(tariff_df):
 
     df = tariff_df.copy()
 
-    df["tariff_group"] = df["Produktnamn"].str.extract(
-        r'(\d+\s*kW\s*(?:Villa|Normal))'
-    )
+    df["tariff_group"] = df["Produktnamn"]
 
     df = df.dropna(subset=["tariff_group"])
 
@@ -92,23 +90,23 @@ def plot_tariff_group_counts(tariff_df):
     return ax
 
 
-
 def plot_tariff_group_cumulative(tariff_df):
 
     df = tariff_df.copy()
 
-    df["tariff_group"] = df["Produktnamn"].str.extract(
+    # extract tariff group
+    df["tariff_plan"] = df["Produktnamn"].str.extract(
         r'(\d+\s*kW\s*(?:Villa|Normal))'
     )
 
-    df = df.dropna(subset=["tariff_group"])
+    df = df.dropna(subset=["tariff_plan"])
 
     df["Startdatum"] = pd.to_datetime(df["Startdatum"])
 
     df["month"] = df["Startdatum"].dt.to_period("M").dt.to_timestamp()
 
     monthly = (
-        df.groupby(["month", "tariff_group"])["GS1-nr."]
+        df.groupby(["month", "tariff_plan"])["GS1-nr."]
         .nunique()
         .unstack()
         .fillna(0)
@@ -126,13 +124,14 @@ def plot_tariff_group_cumulative(tariff_df):
     cumulative = monthly.cumsum()
 
     plt.figure()
+
     ax = cumulative.plot(marker="o")
 
-    plt.title("Cumulative Adoption by Tariff Group")
+    plt.title("Cumulative Adoption by Tariff Plan")
     plt.ylabel("Households")
     plt.xlabel("Month")
 
-    ax.set_xticklabels(cumulative.index.strftime("%Y-%m"), rotation=30)
+    plt.xticks(rotation=30)
 
     ax.legend(title=None)
 

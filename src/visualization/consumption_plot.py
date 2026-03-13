@@ -3,6 +3,7 @@ import matplotlib.ticker as mtick
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
+import pandas as pd
 
 
 def plot_consumption(
@@ -70,17 +71,13 @@ def plot_consumption(
             # case 1: tariff only
             if parts == ["0"]:
                 new_labels.append("No tariff")
+
             elif parts == ["1"]:
                 new_labels.append("Tariff active")
 
-            # case 2: price + tariff
-            elif len(parts) == 2 and parts[0] in ["low","high"]:
-                price_label = "Low price period" if parts[0] == "low" else "High price period"
-                tariff_label = "Tariff active" if parts[1] == "1" else "No tariff"
-                new_labels.append(f"{price_label} – {tariff_label}")
+            # case 2: usage group + tariff
+            elif len(parts) == 2 and "usage_group" in (splits or []):
 
-            # case 3: usage group + tariff
-            elif len(parts) == 2 and parts[0] in ["low","medium","high"]:
                 usage_map = {
                     "low": "Low usage households",
                     "medium": "Medium usage households",
@@ -89,7 +86,15 @@ def plot_consumption(
 
                 tariff_label = "Tariff active" if parts[1] == "1" else "No tariff"
 
-                new_labels.append(f"{usage_map[parts[0]]} – {tariff_label}")
+                new_labels.append(f"{usage_map.get(parts[0], parts[0])} – {tariff_label}")
+
+            # case 3: price + tariff
+            elif len(parts) == 2 and "price" in (splits or []):
+
+                price_label = "Low price period" if parts[0] == "low" else "High price period"
+                tariff_label = "Tariff active" if parts[1] == "1" else "No tariff"
+
+                new_labels.append(f"{price_label} – {tariff_label}")
 
             else:
                 new_labels.append(l)
@@ -126,5 +131,60 @@ def plot_tariff_adoption_by_usage(
 
     if show_percent:
         ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+
+    return ax
+
+
+
+def plot_event_study_tariff(
+    df,
+    value_col="mean_consumption",
+    line_cols="usage_group",
+    window=6
+):
+
+    data = df.copy()
+
+    # only adopters
+    data = data[data["tariff_start"].notna()].copy()
+
+    data["TIDPUNKT"] = pd.to_datetime(data["TIDPUNKT"])
+    data["tariff_start"] = pd.to_datetime(data["tariff_start"])
+
+    # event time (months relative to adoption)
+    data["event_time"] = (
+        (data["TIDPUNKT"].dt.year - data["tariff_start"].dt.year) * 12 +
+        (data["TIDPUNKT"].dt.month - data["tariff_start"].dt.month)
+    )
+
+    data = data[
+        (data["event_time"] >= -window) &
+        (data["event_time"] <= window)
+    ]
+
+    if isinstance(line_cols, str):
+        line_cols = [line_cols]
+
+    g = (
+        data
+        .groupby(["event_time"] + line_cols)[value_col]
+        .mean()
+        .unstack(line_cols)
+    )
+
+    plt.figure()
+
+    ax = g.plot(marker="o")
+
+    plt.axvline(0, linestyle="--")
+
+    title = ", ".join(line_cols).replace("_", " ").title()
+    ax.legend(title=title)
+
+    plt.title("Electricity Consumption Around Tariff Adoption")
+    plt.xlabel("Months Relative to Tariff Adoption")
+    plt.ylabel("Average Electricity Consumption (kWh)")
+
+    plt.xticks(range(-window, window+1))
 
     return ax

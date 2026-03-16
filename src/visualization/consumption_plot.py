@@ -15,10 +15,20 @@ def plot_consumption(
     kind="line",
     show_legend=True,
     figsize=(10,6),
-    dpi=120
+    dpi=120,
+    exclude_future_tariff=False,
+    facet_by=None
 ):
 
+    import matplotlib.pyplot as plt
+
     data = df.copy()
+
+    # remove future adopters from control group
+    if exclude_future_tariff and "tariff_active" in (splits or []):
+        data = data[
+            (data["tariff_active"] == 1) | (data["tariff_start"].isna())
+        ].copy()
 
     group_cols = ["TIDPUNKT"]
 
@@ -33,15 +43,12 @@ def plot_consumption(
     if "price" in (splits or []):
         g = g.drop(columns="all", errors="ignore")
 
-    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-
-    g.plot(kind=kind, marker="o", ax=ax)
-
     title_map = {
-            "month": "Average Monthly Peak Consumption",
-            "hour": "Average Hourly Consumption Profile",
-            "weekday": "Average Consumption by Day of Week",
+        "month": "Average Monthly Peak Consumption",
+        "hour": "Average Hourly Consumption Profile",
+        "weekday": "Average Consumption by Day of Week",
     }
+
     xlabel_map = {
         "month": "Month",
         "hour": "Hour of Day",
@@ -54,47 +61,136 @@ def plot_consumption(
         "variance_consumption": "Variance of Electricity Consumption",
     }
 
-    ax.set_title(title_map.get(group_by, "Electricity Consumption"))
+    title = title_map.get(group_by, "Electricity Consumption")
+
+    if exclude_future_tariff:
+        title += " (Control group: Never adopters)"
+
+    # =========================
+    # FACET MODE
+    # =========================
+
+    if facet_by and facet_by in (splits or []):
+
+        facet_values = sorted(data[facet_by].dropna().unique())
+        n = len(facet_values)
+
+        fig, axes = plt.subplots(
+            n, 1,
+            figsize=(figsize[0], 4*n),
+            dpi=dpi,
+            sharex=True
+        )
+
+        if n == 1:
+            axes = [axes]
+
+        handles = None
+        labels = None
+
+        for i, val in enumerate(facet_values):
+
+            ax = axes[i]
+
+            cols = [
+                c for c in g.columns
+                if val in (c if isinstance(c, tuple) else [c])
+            ]
+
+            g[cols].plot(kind=kind, marker="o", ax=ax)
+
+            # pretty facet title
+            val_label = str(val).replace("_"," ").title()
+            ax.set_title(val_label)
+
+            ax.set_xlabel(xlabel_map.get(group_by, "Month"))
+
+            if i == 0:
+                ax.set_ylabel(
+                    ylabel_map.get(
+                        value_col,
+                        "Electricity Consumption (kWh)"
+                    )
+                )
+
+            ax.tick_params(axis="x", rotation=30)
+
+            if show_legend and i == 0:
+                handles, labels = ax.get_legend_handles_labels()
+
+            if ax.get_legend():
+                ax.get_legend().remove()
+
+        # clean legend labels
+        if show_legend and handles:
+
+            new_labels = []
+
+            for l in labels:
+
+                if "1" in l:
+                    new_labels.append("Tariff active")
+
+                elif "0" in l:
+                    if exclude_future_tariff:
+                        new_labels.append("No tariff (Never adopters)")
+                    else:
+                        new_labels.append("No tariff")
+
+                else:
+                    new_labels.append(l)
+
+            axes[0].legend(handles, new_labels, loc="upper right")
+
+        fig.suptitle(title)
+
+        return axes
+
+    # =========================
+    # SINGLE PLOT
+    # =========================
+
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+
+    g.plot(kind=kind, marker="o", ax=ax)
+
+    ax.set_title(title)
     ax.set_xlabel(xlabel_map.get(group_by, "Month"))
-    ax.set_ylabel(ylabel_map.get(value_col, "Electricity Consumption (kWh)"))
+    ax.set_ylabel(
+        ylabel_map.get(
+            value_col,
+            "Electricity Consumption (kWh)"
+        )
+    )
 
     if show_legend:
 
         handles, labels = ax.get_legend_handles_labels()
-
         new_labels = []
 
         for l in labels:
 
             parts = l.strip("()").split(", ")
 
-            # case 1: tariff only
-            if parts == ["0"]:
-                new_labels.append("No tariff")
-
-            elif parts == ["1"]:
-                new_labels.append("Tariff active")
-
-            # case 2: usage group + tariff
-            elif len(parts) == 2 and "usage_group" in (splits or []):
-
-                usage_map = {
-                    "low": "Low usage households",
-                    "medium": "Medium usage households",
-                    "high": "High usage households"
-                }
-
-                tariff_label = "Tariff active" if parts[1] == "1" else "No tariff"
-
-                new_labels.append(f"{usage_map.get(parts[0], parts[0])} – {tariff_label}")
-
-            # case 3: price + tariff
-            elif len(parts) == 2 and "price" in (splits or []):
+            # price + tariff
+            if len(parts) == 2 and "price" in (splits or []):
 
                 price_label = "Low price period" if parts[0] == "low" else "High price period"
+
                 tariff_label = "Tariff active" if parts[1] == "1" else "No tariff"
 
                 new_labels.append(f"{price_label} – {tariff_label}")
+
+            # tariff only
+            elif parts == ["0"]:
+
+                if exclude_future_tariff:
+                    new_labels.append("No tariff (Never adopters)")
+                else:
+                    new_labels.append("No tariff")
+
+            elif parts == ["1"]:
+                new_labels.append("Tariff active")
 
             else:
                 new_labels.append(l)

@@ -1,3 +1,7 @@
+############################################################
+# Calendar Month Risk-Set Matching
+############################################################
+
 library(arrow)
 library(dplyr)
 library(lubridate)
@@ -7,27 +11,58 @@ library(tidyr)
 library(ggplot2)
 library(tibble)
 
-# =========================================================
-# 1) Risk-set matching
-# =========================================================
+############################################################
+# Helper: build calendar-month features
+############################################################
+
+build_calendar_features <- function(window, match_months){
+  
+  window <- window %>%
+    mutate(
+      month_of_year = month(month),
+      year_val = year(month)
+    ) %>%
+    filter(month_of_year %in% match_months)
+  
+  if(nrow(window) == 0) return(NULL)
+  
+  window <- window %>%
+    arrange(desc(month)) %>%
+    group_by(month_of_year) %>%
+    mutate(lag_id = row_number()) %>%
+    ungroup()
+  
+  features <- window %>%
+    mutate(
+      feature = paste0(
+        tolower(month.abb[month_of_year]),
+        "_lag",
+        lag_id
+      )
+    ) %>%
+    select(feature, top3_mean_consumption)
+  
+  values <- features$top3_mean_consumption
+  names(values) <- features$feature
+  
+  return(values)
+}
+
+############################################################
+# Risk-set matching
+############################################################
+
 risk_set_matching_peak <- function(
     data,
     id_col = "aID",
     month_col = "TIDPUNKT",
     adoption_col = "tariff_start",
-    lookback_months = 12,
+    lookback_months = 24,
     k_neighbors = 5,
     price_filter = "all",
-    feature_mode = "time_series"   # "time_series" or "summary"
+    match_months = c(1,6,12)
 ){
   
-  if (!feature_mode %in% c("time_series", "summary")) {
-    stop("feature_mode must be 'time_series' or 'summary'")
-  }
-  
-  # -------------------
-  # 1 Clean data
-  # -------------------
   df <- data %>%
     filter(price == price_filter) %>%
     mutate(
@@ -36,51 +71,28 @@ risk_set_matching_peak <- function(
     ) %>%
     arrange(.data[[id_col]], month)
   
-  # -------------------
-  # 2 Find adopters
-  # -------------------
   adopters <- df %>%
     filter(!is.na(adoption_month)) %>%
     distinct(.data[[id_col]], adoption_month)
   
-  # -------------------
-  # 3 Profile builder
-  # -------------------
   build_profile <- function(user_data, Ti){
     
     window <- user_data %>%
       filter(
         month >= Ti %m-% months(lookback_months),
         month < Ti
-      ) %>%
-      arrange(month)
-    
-    if (nrow(window) < lookback_months) return(NULL)
-    
-    if (feature_mode == "time_series") {
-      
-      values <- window$top3_mean_consumption[1:lookback_months]
-      names(values) <- paste0("peak_", 1:lookback_months)
-      
-      tibble(
-        id = unique(user_data[[id_col]])[1],
-        !!!as.list(values)
       )
-      
-    } else if (feature_mode == "summary") {
-      
-      tibble(
-        id = unique(user_data[[id_col]])[1],
-        peak_mean = mean(window$top3_mean_consumption, na.rm = TRUE),
-        peak_sd = sd(window$top3_mean_consumption, na.rm = TRUE),
-        peak_volatility = mean(abs(diff(window$top3_mean_consumption)), na.rm = TRUE)
-      )
-    }
+    
+    feats <- build_calendar_features(window, match_months)
+    
+    if(is.null(feats)) return(NULL)
+    
+    tibble(
+      id = unique(user_data[[id_col]])[1],
+      !!!as.list(feats)
+    )
   }
   
-  # -------------------
-  # 4 Matching loop
-  # -------------------
   results <- map_dfr(seq_len(nrow(adopters)), function(i){
     
     treated_id <- adopters[[id_col]][i]
@@ -91,7 +103,7 @@ risk_set_matching_peak <- function(
     
     treated_profile <- build_profile(treated_data, Ti)
     
-    if (is.null(treated_profile)) return(NULL)
+    if(is.null(treated_profile)) return(NULL)
     
     controls <- df %>%
       filter(
@@ -108,15 +120,15 @@ risk_set_matching_peak <- function(
       
       prof <- build_profile(dat, Ti)
       
-      if (is.null(prof)) return(NULL)
+      if(is.null(prof)) return(NULL)
       
       prof %>%
         mutate(control_id = cid)
     })
     
-    if (nrow(control_profiles) == 0) return(NULL)
+    if(nrow(control_profiles) == 0) return(NULL)
     
-    feature_cols <- setdiff(names(control_profiles), c("id", "control_id"))
+    feature_cols <- setdiff(names(control_profiles), c("id","control_id"))
     
     X_control <- control_profiles %>%
       select(all_of(feature_cols)) %>%
@@ -125,44 +137,40 @@ risk_set_matching_peak <- function(
     X_treated <- treated_profile %>%
       select(all_of(feature_cols)) %>%
       scale(
-        center = attr(X_control, "scaled:center"),
-        scale  = attr(X_control, "scaled:scale")
+        center = attr(X_control,"scaled:center"),
+        scale = attr(X_control,"scaled:scale")
       )
     
-    k_use <- min(k_neighbors, nrow(control_profiles))
-    if (k_use == 0) return(NULL)
+    k_use <- min(k_neighbors,nrow(control_profiles))
     
-    nn <- get.knnx(X_control, X_treated, k = k_use)
+    nn <- get.knnx(X_control,X_treated,k=k_use)
     
-    matched <- control_profiles[nn$nn.index[1, ], , drop = FALSE]
+    matched <- control_profiles[nn$nn.index[1,],,drop=FALSE]
     
     matched %>%
       mutate(
         treated_id = treated_id,
         adoption_month = Ti,
-        distance = nn$nn.dist[1, ]
+        distance = nn$nn.dist[1,]
       )
   })
   
   return(results)
 }
 
-# =========================================================
-# 2) Build profile dataset for balance diagnostics
-# =========================================================
+############################################################
+# Build profiles for balance diagnostics
+############################################################
+
 build_profiles <- function(
     data,
     id_col = "aID",
     month_col = "TIDPUNKT",
     adoption_col = "tariff_start",
-    lookback_months = 12,
+    lookback_months = 24,
     price_filter = "all",
-    feature_mode = "time_series"
+    match_months = c(1,6,12)
 ){
-  
-  if (!feature_mode %in% c("time_series", "summary")) {
-    stop("feature_mode must be 'time_series' or 'summary'")
-  }
   
   df <- data %>%
     filter(price == price_filter) %>%
@@ -182,30 +190,16 @@ build_profiles <- function(
       filter(
         month >= Ti %m-% months(lookback_months),
         month < Ti
-      ) %>%
-      arrange(month)
-    
-    if (nrow(window) < lookback_months) return(NULL)
-    
-    if (feature_mode == "time_series") {
-      
-      values <- window$top3_mean_consumption[1:lookback_months]
-      names(values) <- paste0("peak_", 1:lookback_months)
-      
-      tibble(
-        id = unique(user_data[[id_col]])[1],
-        !!!as.list(values)
       )
-      
-    } else {
-      
-      tibble(
-        id = unique(user_data[[id_col]])[1],
-        peak_mean = mean(window$top3_mean_consumption, na.rm = TRUE),
-        peak_sd = sd(window$top3_mean_consumption, na.rm = TRUE),
-        peak_volatility = mean(abs(diff(window$top3_mean_consumption)), na.rm = TRUE)
-      )
-    }
+    
+    feats <- build_calendar_features(window, match_months)
+    
+    if(is.null(feats)) return(NULL)
+    
+    tibble(
+      id = unique(user_data[[id_col]])[1],
+      !!!as.list(feats)
+    )
   }
   
   profiles <- map_dfr(seq_len(nrow(adopters)), function(i){
@@ -218,7 +212,7 @@ build_profiles <- function(
     
     prof <- build_profile(user_data, Ti)
     
-    if (is.null(prof)) return(NULL)
+    if(is.null(prof)) return(NULL)
     
     prof %>%
       mutate(adoption_month = Ti)
@@ -227,40 +221,36 @@ build_profiles <- function(
   return(profiles)
 }
 
-# =========================================================
-# 3) Balance table
-# =========================================================
+############################################################
+# Balance table
+############################################################
+
 balance_table <- function(profiles, matches){
-  
-  if (nrow(matches) == 0) {
-    stop("matches is empty")
-  }
   
   treated_ids <- unique(matches$treated_id)
   
   treated <- profiles %>%
     filter(id %in% treated_ids)
   
-  # 用 matches 保留 control 重複次數
   control <- matches %>%
     select(control_id) %>%
     rename(id = control_id) %>%
-    left_join(profiles, by = "id")
+    left_join(profiles,by="id")
   
-  covariates <- setdiff(names(profiles), c("id", "adoption_month"))
+  covariates <- setdiff(names(profiles),c("id","adoption_month"))
   
-  smd <- function(x, y) {
-    (mean(x, na.rm = TRUE) - mean(y, na.rm = TRUE)) /
-      sqrt((var(x, na.rm = TRUE) + var(y, na.rm = TRUE)) / 2)
+  smd <- function(x,y){
+    (mean(x,na.rm=TRUE)-mean(y,na.rm=TRUE)) /
+      sqrt((var(x,na.rm=TRUE)+var(y,na.rm=TRUE))/2)
   }
   
-  balance <- lapply(covariates, function(v){
+  balance <- lapply(covariates,function(v){
     
     tibble(
-      covariate = v,
-      treated_mean = mean(treated[[v]], na.rm = TRUE),
-      control_mean = mean(control[[v]], na.rm = TRUE),
-      SMD = smd(treated[[v]], control[[v]])
+      covariate=v,
+      treated_mean=mean(treated[[v]],na.rm=TRUE),
+      control_mean=mean(control[[v]],na.rm=TRUE),
+      SMD=smd(treated[[v]],control[[v]])
     )
   }) %>%
     bind_rows()
@@ -268,81 +258,59 @@ balance_table <- function(profiles, matches){
   return(balance)
 }
 
-# =========================================================
-# 4) Love plot
-# =========================================================
-love_plot <- function(balance, title = "Covariate Balance"){
+############################################################
+# Love plot
+############################################################
+
+love_plot <- function(balance,title="Covariate Balance"){
   
   ggplot(balance,
-         aes(x = abs(SMD),
-             y = reorder(covariate, abs(SMD)))) +
-    geom_point(size = 3, color = "steelblue") +
-    geom_vline(xintercept = 0.1,
-               linetype = "dashed",
-               color = "red") +
+         aes(x=abs(SMD),
+             y=reorder(covariate,abs(SMD))))+
+    geom_point(size=3,color="steelblue")+
+    geom_vline(xintercept=0.1,
+               linetype="dashed",
+               color="red")+
     labs(
-      title = title,
-      x = "|Standardized Mean Difference|",
-      y = "Covariate"
-    ) +
+      title=title,
+      x="|Standardized Mean Difference|",
+      y="Covariate"
+    )+
     theme_minimal()
 }
 
-# =========================================================
-# 5) Run everything
-# =========================================================
+############################################################
+# Run everything
+############################################################
+
 df <- read_parquet("output/data/monthly_agg.parquet")
 
-# -------------------
-# time_series mode
-# -------------------
-matches_ts <- risk_set_matching_peak(
-  data = df,
-  feature_mode = "time_series",
-  lookback_months = 12,
-  k_neighbors = 5
+matches <- risk_set_matching_peak(
+  data=df,
+  lookback_months=24,
+  match_months=c(1,6,12),
+  k_neighbors=5
 )
 
-profiles_ts <- build_profiles(
-  data = df,
-  feature_mode = "time_series",
-  lookback_months = 12
+profiles <- build_profiles(
+  data=df,
+  lookback_months=24,
+  match_months=c(1,6,12)
 )
 
-balance_ts <- balance_table(
-  profiles = profiles_ts,
-  matches = matches_ts
+balance <- balance_table(
+  profiles=profiles,
+  matches=matches
 )
 
-print(balance_ts)
-love_plot(balance_ts, title = "Love Plot - Time Series")
+print(balance)
 
-# -------------------
-# summary mode
-# -------------------
-matches_summary <- risk_set_matching_peak(
-  data = df,
-  feature_mode = "summary",
-  lookback_months = 12,
-  k_neighbors = 5
-)
+love_plot(balance,"Love Plot - Calendar Month Matching")
 
-profiles_summary <- build_profiles(
-  data = df,
-  feature_mode = "summary",
-  lookback_months = 12
-)
+############################################################
+# Save outputs
+############################################################
 
-balance_summary <- balance_table(
-  profiles = profiles_summary,
-  matches = matches_summary
-)
-
-print(balance_summary)
-love_plot(balance_summary, title = "Love Plot - Summary Statistics")
-
-
-## create folders if not exist
 dirs <- c(
   "output",
   "output/matching",
@@ -350,52 +318,27 @@ dirs <- c(
   "output/figures"
 )
 
-for (d in dirs) {
-  if (!dir.exists(d)) {
+for(d in dirs){
+  if(!dir.exists(d)){
     dir.create(d)
   }
 }
 
-# Save matching parquet
-library(arrow)
-
 write_parquet(
-  matches_ts,
-  "output/matching/matches_ts.parquet"
-)
-
-write_parquet(
-  matches_summary,
-  "output/matching/matches_summary.parquet"
-)
-
-# balance table
-write.csv(
-  balance_ts,
-  "output/diagnostics/balance_ts.csv",
-  row.names = FALSE
+  matches,
+  "output/matching/matches_calendar.parquet"
 )
 
 write.csv(
-  balance_summary,
-  "output/diagnostics/balance_summary.csv",
-  row.names = FALSE
-)
-
-
-# love plot
-ggsave(
-  "output/figures/loveplot_ts.png",
-  plot = love_plot(balance_ts, "Love Plot - Time Series"),
-  width = 7,
-  height = 5,
-  dpi = 300
+  balance,
+  "output/diagnostics/balance_calendar.csv",
+  row.names=FALSE
 )
 
 ggsave(
-  "output/figures/loveplot_summary.png",
-  plot = love_plot(balance_summary, "Love Plot - Summary Statistics"),
-  width = 7,
-  height = 5,
-  dpi = 300
+  "output/figures/loveplot_calendar.png",
+  plot=love_plot(balance,"Love Plot - Calendar Matching"),
+  width=7,
+  height=5,
+  dpi=300
 )

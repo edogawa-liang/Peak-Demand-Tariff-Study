@@ -428,7 +428,10 @@ p_s4 <- love_plot(balance_summary_season, "Summary Matching for High Price Perio
 p_cal <- love_plot(balance_calendar, "Matching for High Price Period")
 
 
+# =========================
 # save the matching results
+# =========================
+
 dir.create("output/matching", recursive = TRUE, showWarnings = FALSE)
 dir.create("output/figures", recursive = TRUE, showWarnings = FALSE)
 library(arrow)

@@ -163,6 +163,7 @@ risk_set_matching_peak <- function(
     adoption_col="tariff_start",
     lookback_months=12,
     k_neighbors=5,
+    blocking_threshold=0.3,
     feature_mode="time_series",
     match_months=NULL,
     summary_vars=NULL){
@@ -202,6 +203,13 @@ risk_set_matching_peak <- function(
     control_profiles <- list()
     control_ids <- c()
     
+    # ---- blocking threshold --- #
+    if("peak_mean" %in% names(treated_profile)){
+      threshold <- blocking_threshold * treated_profile["peak_mean"]
+    } else {
+      threshold <- Inf
+    }
+    
     for(cid in controls){
       
       dat <- df[df[[id_col]]==cid,]
@@ -211,6 +219,15 @@ risk_set_matching_peak <- function(
         feature_mode,match_months,summary_vars)
       
       if(!is.null(prof)){
+        
+        # ===== blocking using peak_mean =====
+        if("peak_mean" %in% names(prof) && is.finite(threshold)){
+          
+          diff <- abs(prof["peak_mean"] - treated_profile["peak_mean"])
+          
+          if(diff > threshold) next
+        }
+        
         control_profiles[[length(control_profiles)+1]] <- prof
         control_ids <- c(control_ids,cid)
       }

@@ -20,7 +20,6 @@ def plot_consumption(
     facet_by=None
 ):
 
-    import matplotlib.pyplot as plt
 
     data = df.copy()
 
@@ -29,6 +28,9 @@ def plot_consumption(
         data = data[
             (data["tariff_active"] == 1) | (data["tariff_start"].isna())
         ].copy()
+
+        print("Before:", len(df))
+        print("After:", len(data))
 
     group_cols = ["TIDPUNKT"]
 
@@ -235,19 +237,19 @@ def plot_tariff_adoption_by_usage(
 def plot_event_study_tariff(
     df,
     value_col="mean_consumption",
-    line_cols="usage_group",
+    line_cols=None,
     window=6
 ):
 
     data = df.copy()
 
-    # only adopters
+    # keep adopters only
     data = data[data["tariff_start"].notna()].copy()
 
     data["TIDPUNKT"] = pd.to_datetime(data["TIDPUNKT"])
     data["tariff_start"] = pd.to_datetime(data["tariff_start"])
 
-    # event time (months relative to adoption)
+    # event time (months)
     data["event_time"] = (
         (data["TIDPUNKT"].dt.year - data["tariff_start"].dt.year) * 12 +
         (data["TIDPUNKT"].dt.month - data["tariff_start"].dt.month)
@@ -258,29 +260,39 @@ def plot_event_study_tariff(
         (data["event_time"] <= window)
     ]
 
-    if isinstance(line_cols, str):
-        line_cols = [line_cols]
+    if line_cols is None:
 
-    g = (
-        data
-        .groupby(["event_time"] + line_cols)[value_col]
-        .mean()
-        .unstack(line_cols)
-    )
+        g = data.groupby("event_time")[value_col].mean()
+        plt.figure()
+        ax = g.plot(marker="o")
 
-    plt.figure()
+    else:
 
-    ax = g.plot(marker="o")
+        if isinstance(line_cols, str):
+            line_cols = [line_cols]
+
+        g = (
+            data
+            .groupby(["event_time"] + line_cols)[value_col]
+            .mean()
+            .unstack(line_cols)
+        )
+
+        plt.figure()
+        ax = g.plot(marker="o")
+
+        title = ", ".join(line_cols).replace("_", " ").title()
+        ax.legend(title=title)
 
     plt.axvline(0, linestyle="--")
-
-    title = ", ".join(line_cols).replace("_", " ").title()
-    ax.legend(title=title)
 
     plt.title("Electricity Consumption Around Tariff Adoption")
     plt.xlabel("Months Relative to Tariff Adoption")
     plt.ylabel("Average Electricity Consumption (kWh)")
 
     plt.xticks(range(-window, window+1))
+
+    if line_cols is None and ax.get_legend() is not None:
+        ax.get_legend().remove()
 
     return ax

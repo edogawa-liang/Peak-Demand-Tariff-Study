@@ -19,9 +19,9 @@ def _extract_peak_times(df):
 def _extract_peak_consumption(df):
 
     return pd.concat([
-        df["peak1_consumption"],
-        df["peak2_consumption"],
-        df["peak3_consumption"]
+        pd.to_numeric(df["peak1_consumption"], errors="coerce"),
+        pd.to_numeric(df["peak2_consumption"], errors="coerce"),
+        pd.to_numeric(df["peak3_consumption"], errors="coerce")
     ]).dropna()
 
 
@@ -160,8 +160,10 @@ def plot_peak_rank_boxplot(df):
         "peak3_consumption": "Peak 3"
     })
 
-    plt.figure(figsize=(6,4))
+    # Turn to numeric
+    data = data.apply(pd.to_numeric, errors="coerce")
 
+    plt.figure(figsize=(6,4))
     sns.boxplot(data=data)
 
     plt.ylabel("Consumption (kWh)")

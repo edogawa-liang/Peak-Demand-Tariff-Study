@@ -73,6 +73,8 @@ def plot_tariff_group_counts(tariff_df):
     df = tariff_df.copy()
 
     df["tariff_group"] = df["Produktnamn"]
+    df["tariff_group"] = df["Produktnamn"].str.extract(
+    r'(\d+\s*kW\s*\w+)', expand=False)
 
     df = df.dropna(subset=["tariff_group"])
 

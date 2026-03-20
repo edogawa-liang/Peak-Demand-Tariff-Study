@@ -371,10 +371,18 @@ love_plot <- function(balance,title="Covariate Balance"){
 df <- read_parquet("output/data/monthly_agg.parquet")
 df_all <- df[df$price=="all",]
 
+# =========================
 # time series
-res_ts <- risk_set_matching_peak(df_all,lookback_months=12)
+# =========================
+cat("Running time series matching...\n")
+res_ts <- risk_set_matching_peak(df_all, lookback_months=12)
+print(names(res_ts))
 
-# summary
+
+# =========================
+# summary 1
+# =========================
+cat("Running summary matching 1...\n")
 res_summary_1 <- risk_set_matching_peak(
   df_all,lookback_months=12,
   feature_mode="summary",
@@ -384,7 +392,13 @@ res_summary_1 <- risk_set_matching_peak(
     "peak_sd",
     "trend"
   ))
+print(names(res_summary_1))
 
+
+# =========================
+# summary 2
+# =========================
+cat("Running summary matching 2...\n")
 res_summary_2 <- risk_set_matching_peak(
   df_all,lookback_months=12,
   feature_mode="summary",
@@ -394,8 +408,13 @@ res_summary_2 <- risk_set_matching_peak(
     "variance_consumption",
     "trend"
   ))
+print(names(res_summary_2))
 
 
+# =========================
+# summary 3
+# =========================
+cat("Running summary matching 3...\n")
 res_summary_3 <- risk_set_matching_peak(
   df_all,lookback_months=12,
   feature_mode="summary",
@@ -404,8 +423,13 @@ res_summary_3 <- risk_set_matching_peak(
     "peak_sd",
     "trend"
   ))
+print(names(res_summary_3))
 
-# High price period summary
+
+# =========================
+# High price period
+# =========================
+cat("Running seasonal summary matching...\n")
 res_summary_season <- risk_set_matching_peak(
   df_all,
   lookback_months = 24,
@@ -418,32 +442,66 @@ res_summary_season <- risk_set_matching_peak(
     "trend"
   )
 )
-# peak_mean, peak_sd, peak_volatility, mean_consumption, variance_consumption, total_consumption, trend
+print(names(res_summary_season))
 
+
+# =========================
 # calendar
+# =========================
+cat("Running calendar matching...\n")
 res_calendar <- risk_set_matching_peak(
   df_all,
   lookback_months=24,
   match_months=c(1,2,3,11,12))
+print(names(res_calendar))
 
+
+# =========================
+# balance tables
+# =========================
+cat("Computing balance tables...\n")
 
 balance_ts <- balance_table(res_ts$profiles)
+print(head(balance_ts))
+
 balance_summary_1 <- balance_table(res_summary_1$profiles)
+print(head(balance_summary_1))
+
 balance_summary_2 <- balance_table(res_summary_2$profiles)
+print(head(balance_summary_2))
+
 balance_summary_3 <- balance_table(res_summary_3$profiles)
-balance_summary_season<- balance_table(res_summary_season$profiles)
+print(head(balance_summary_3))
+
+balance_summary_season <- balance_table(res_summary_season$profiles)
+print(head(balance_summary_season))
+
 balance_calendar <- balance_table(res_calendar$profiles)
+print(head(balance_calendar))
+
 
 # =========================
 # plot
 # =========================
-p_ts <- love_plot(balance_ts, "Time Series Matching")
-p_s1 <- love_plot(balance_summary_1, "Summary Matching")
-p_s2 <- love_plot(balance_summary_2, "Summary Matching")
-p_s3 <- love_plot(balance_summary_3, "Summary Matching")
-p_s4 <- love_plot(balance_summary_season, "Summary Matching for High Price Period")
-p_cal <- love_plot(balance_calendar, "Matching for High Price Period")
+cat("Generating plots...\n")
 
+p_ts <- love_plot(balance_ts, "Time Series Matching")
+print(p_ts)
+
+p_s1 <- love_plot(balance_summary_1, "Summary Matching")
+print(p_s1)
+
+p_s2 <- love_plot(balance_summary_2, "Summary Matching")
+print(p_s2)
+
+p_s3 <- love_plot(balance_summary_3, "Summary Matching")
+print(p_s3)
+
+p_s4 <- love_plot(balance_summary_season, "Summary Matching for High Price Period")
+print(p_s4)
+
+p_cal <- love_plot(balance_calendar, "Matching for High Price Period")
+print(p_cal)
 
 # =========================
 # save the matching results

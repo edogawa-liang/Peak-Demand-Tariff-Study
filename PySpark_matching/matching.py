@@ -65,8 +65,9 @@ def prepare_base_spark(
     """
     out = sdf
 
-    if price_col is not None and price_value is not None and price_col in sdf.columns:
-        out = out.filter(F.col(price_col) == F.lit(price_value))
+    if price_col is not None and price_value is not None:
+        if price_col in sdf.columns:
+            out = out.filter(F.col(price_col) == F.lit(price_value))
 
     out = (
         out
@@ -565,41 +566,41 @@ def balance_table_spark(
 
 def love_plot_from_spark(
     balance_spark: DataFrame,
-    output_path: str,
-    title: str = "Covariate Balance"
+    output_path: Optional[str] = None,
+    title: str = "Covariate Balance",
+    show_plot: bool = True   # 👈 新增
 ):
-    """
-    balance table 很小，collect 成 pandas 畫圖通常沒問題。
-    """
     pdf = balance_spark.toPandas()
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
 
     if pdf is None or len(pdf) == 0:
         ax.set_title(title)
-        ax.set_xlabel("|Standardized Mean Difference|")
-        ax.set_ylabel("Covariate")
-        plt.tight_layout()
-        ensure_folder(output_path)
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        return
+    else:
+        plot_df = pdf.copy()
+        plot_df["abs_SMD"] = pd.to_numeric(plot_df["SMD"], errors="coerce").abs()
+        plot_df = plot_df.sort_values("abs_SMD")
 
-    plot_df = pdf.copy()
-    plot_df["abs_SMD"] = pd.to_numeric(plot_df["SMD"], errors="coerce").abs()
-    plot_df["covariate"] = plot_df["covariate"].astype(str)
-    plot_df = plot_df.sort_values("abs_SMD", ascending=True)
+        ax.scatter(plot_df["abs_SMD"], plot_df["covariate"], s=40)
+        ax.axvline(0.1, linestyle="--")
 
-    ax.scatter(plot_df["abs_SMD"], plot_df["covariate"], s=40)
-    ax.axvline(0.1, linestyle="--")
     ax.set_title(title)
     ax.set_xlabel("|Standardized Mean Difference|")
     ax.set_ylabel("Covariate")
 
     plt.tight_layout()
-    ensure_folder(output_path)
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+
+    # 👇 存檔（Fabric）
+    if output_path is not None:
+        real_path = output_path.replace("Files/", "/lakehouse/default/Files/")
+        os.makedirs(os.path.dirname(real_path), exist_ok=True)
+        fig.savefig(real_path, dpi=150, bbox_inches="tight")
+
+    # 👇 顯示在 notebook
+    if show_plot:
+        plt.show()
+
+        plt.close(fig)
 
 
 # ============================================================
@@ -647,6 +648,7 @@ def run_summary_matching_pipeline(
     repartition_by_ti: bool = True,
     verbose: bool = True,
     match_months: Optional[List[int]] = None,
+    save_output: bool = False 
 ) -> Dict[str, DataFrame]:
 
     if summary_vars is None:
@@ -734,21 +736,23 @@ def run_summary_matching_pipeline(
 
     if verbose:
         print("Saving outputs ...")
-    save_matching_outputs(
-        matches=matches,
-        profiles=matched_profiles,
-        balance=balance,
-        config={
-            "type": "summary",
-            "lookback_months": lookback_months,
-            "k_neighbors": k_neighbors,
-            "blocking_threshold": blocking_threshold,
-            "summary_vars": summary_vars,
-            "min_ti": min_ti,
-            "max_ti": max_ti
-        },
-        folder=output_folder
-    )
+
+    if save_output:
+        save_matching_outputs(
+            matches=matches,
+            profiles=matched_profiles,
+            balance=balance,
+            config={
+                "type": "summary",
+                "lookback_months": lookback_months,
+                "k_neighbors": k_neighbors,
+                "blocking_threshold": blocking_threshold,
+                "summary_vars": summary_vars,
+                "min_ti": min_ti,
+                "max_ti": max_ti
+            },
+            folder=output_folder
+        )
 
     return {
         "risk_rows": risk_rows,
@@ -774,6 +778,7 @@ def run_time_series_matching_pipeline(
     repartition_by_ti: bool = True,
     verbose: bool = True,
     match_months: Optional[List[int]] = None,
+    save_output: bool = False 
 ) -> Dict[str, DataFrame]:
 
     feature_cols = [f"peak_lag_{i}" for i in range(1, lookback_months + 1)]
@@ -863,20 +868,296 @@ def run_time_series_matching_pipeline(
 
     if verbose:
         print("Saving outputs ...")
-    save_matching_outputs(
-        matches=matches,
-        profiles=matched_profiles,
-        balance=balance,
-        config={
-            "type": "time_series_fixed_lag",
-            "lookback_months": lookback_months,
-            "k_neighbors": k_neighbors,
-            "feature_cols": feature_cols,
-            "min_ti": min_ti,
-            "max_ti": max_ti
-        },
-        folder=output_folder
+
+    if save_output:
+        save_matching_outputs(
+            matches=matches,
+            profiles=matched_profiles,
+            balance=balance,
+            config={
+                "type": "time_series_fixed_lag",
+                "lookback_months": lookback_months,
+                "k_neighbors": k_neighbors,
+                "feature_cols": feature_cols,
+                "min_ti": min_ti,
+                "max_ti": max_ti
+            },
+            folder=output_folder
+        )
+
+    return {
+        "risk_rows": risk_rows,
+        "profiles": profiles_z,
+        "matches": matches,
+        "matched_profiles": matched_profiles,
+        "balance": balance
+    }
+
+
+
+def save_matching_results_fabric(
+    res: dict,
+    folder: str,
+    config: Optional[dict] = None,
+    save_plot: bool = True,
+):
+    import os
+    import json
+
+    if not folder.startswith("Files/"):
+        raise ValueError("Folder must start with 'Files/' in Fabric")
+
+    matches = res["matches"]
+    profiles = res["matched_profiles"]
+    balance = res["balance"]
+
+    # ============================================================
+    # Spark parquet（不用建資料夾）
+    # ============================================================
+    print(f"Saving parquet to {folder} ...")
+
+    matches.write.mode("overwrite").parquet(f"{folder}/matches")
+    profiles.write.mode("overwrite").parquet(f"{folder}/profiles")
+    balance.write.mode("overwrite").parquet(f"{folder}/balance")
+
+    # ============================================================
+    # config（需要建資料夾）
+    # ============================================================
+    if config is not None:
+        config_path = f"{folder}/config.json"
+
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=2)
+
+
+    print("✅ Save completed")
+
+
+
+    # =========== Calendar Vector Matching =========== #
+# =========== Calendar Vector Matching =========== #
+def build_calendar_aligned_profiles(
+    risk_rows: DataFrame,
+    match_months: List[int],
+    n_years: int = 2
+) -> DataFrame:
+
+    df = (
+        risk_rows
+        .withColumn("year", F.year("month"))
+        .withColumn("month_num", F.month("month"))
     )
+
+    # 👉 距離 Ti 幾年前
+    df = df.withColumn(
+        "year_diff",
+        F.year("Ti") - F.col("year")
+    )
+
+    # 👉 只保留過去 n_years
+    df = df.where(
+        (F.col("year_diff") >= 1) &
+        (F.col("year_diff") <= n_years)
+    )
+
+    # 👉 只保留指定月份
+    df = df.where(F.col("month_num").isin(match_months))
+
+    # 👉 month number → 字串（jan, feb…）
+    mapping_expr = F.create_map(
+        *[item for i in MONTH_ABB for item in (F.lit(i), F.lit(MONTH_ABB[i]))]
+    )
+
+    df = df.withColumn("month_str", mapping_expr[F.col("month_num")])
+
+    # 👉 feature name（jan_1, jan_2）
+    df = df.withColumn(
+        "feature_name",
+        F.concat(F.col("month_str"), F.lit("_"), F.col("year_diff"))
+    )
+
+    # 👉 pivot 成 wide format
+    prof = (
+        df
+        .groupBy("Ti", "id", "adoption_month", "group")
+        .pivot("feature_name")
+        .agg(F.first("top3_mean_consumption"))
+    )
+
+    return prof
+
+
+
+def match_topk_allow_missing(
+    profiles_z: DataFrame,
+    feature_cols: List[str],
+    k_neighbors: int = 5
+) -> DataFrame:
+
+    treated = profiles_z.where(F.col("group") == "treated").alias("t")
+    control = profiles_z.where(F.col("group") == "control").alias("c")
+
+    cand = (
+        treated.join(control, on=[F.col("t.Ti") == F.col("c.Ti")])
+        .where(F.col("t.id") != F.col("c.id"))
+    )
+
+    dist_expr = None
+    valid_count = None
+
+    for c in feature_cols:
+        both_not_null = (
+            F.col(f"t.{c}_z").isNotNull() &
+            F.col(f"c.{c}_z").isNotNull()
+        )
+
+        diff_sq = F.when(
+            both_not_null,
+            F.pow(F.col(f"t.{c}_z") - F.col(f"c.{c}_z"), 2)
+        ).otherwise(F.lit(0.0))
+
+        count = F.when(both_not_null, 1).otherwise(0)
+
+        dist_expr = diff_sq if dist_expr is None else dist_expr + diff_sq
+        valid_count = count if valid_count is None else valid_count + count
+
+    cand = (
+        cand
+        .withColumn("valid_dim", valid_count)
+        .withColumn("distance", F.sqrt(dist_expr))
+        .where(F.col("valid_dim") > 0)
+    )
+
+    w = Window.partitionBy(F.col("t.Ti"), F.col("t.id")) \
+              .orderBy(F.col("distance"), F.col("c.id"))
+
+    matches = (
+        cand
+        .withColumn("match_rank", F.row_number().over(w))
+        .where(F.col("match_rank") <= k_neighbors)
+        .select(
+            F.col("t.id").alias("treated_id"),
+            F.col("c.id").alias("control_id"),
+            F.col("t.Ti").alias("adoption_month"),
+            "distance",
+            "valid_dim",
+            "match_rank"
+        )
+    )
+
+    return matches
+
+
+def run_calendar_matching_aligned(
+    sdf: DataFrame,
+    output_folder: str,
+    id_col: str = "aID",
+    month_col: str = "TIDPUNKT",
+    adoption_col: str = "tariff_start",
+    price_col: Optional[str] = "price",
+    price_value: Optional[str] = "all",
+    lookback_years: int = 2,
+    match_months: List[int] = [1,2,3,11,12],
+    k_neighbors: int = 5,
+    repartition_by_ti: bool = True,
+    verbose: bool = True,
+    save_output: bool = False
+) -> Dict[str, DataFrame]:
+
+    # ============================================================
+    # base
+    # ============================================================
+    base = prepare_base_spark(
+        sdf=sdf,
+        id_col=id_col,
+        month_col=month_col,
+        adoption_col=adoption_col,
+        price_col=price_col,
+        price_value=price_value
+    )
+
+    # ============================================================
+    # risk set
+    # ============================================================
+    risk_rows = build_risk_set_rows(
+        base,
+        lookback_months=lookback_years * 12,
+        match_months=match_months
+    )
+
+    if repartition_by_ti:
+        risk_rows = risk_rows.repartition("Ti")
+
+    risk_rows = risk_rows.cache()
+
+    if verbose:
+        print("risk_rows:", risk_rows.count())
+
+    # ============================================================
+    # profiles（calendar aligned）
+    # ============================================================
+    profiles = build_calendar_aligned_profiles(
+        risk_rows,
+        match_months=match_months,
+        n_years=lookback_years
+    )
+
+    feature_cols = [
+        c for c in profiles.columns
+        if c not in ["Ti", "id", "adoption_month", "group"]
+    ]
+
+    if repartition_by_ti:
+        profiles = profiles.repartition("Ti")
+
+    profiles = profiles.cache()
+
+    # ============================================================
+    # standardize
+    # ============================================================
+    profiles_z = standardize_by_control(profiles, feature_cols)
+
+    if repartition_by_ti:
+        profiles_z = profiles_z.repartition("Ti")
+
+    profiles_z = profiles_z.cache()
+
+    # ============================================================
+    # matching
+    # ============================================================
+    matches = match_topk_allow_missing(
+        profiles_z,
+        feature_cols,
+        k_neighbors=k_neighbors
+    )
+
+    matches = matches.cache()
+
+    # ============================================================
+    # matched profiles + balance
+    # ============================================================
+    matched_profiles = build_matched_profiles(profiles_z, matches).cache()
+
+    balance = balance_table_spark(matched_profiles, feature_cols).cache()
+
+    # ============================================================
+    # save（可選）
+    # ============================================================
+    if save_output:
+        save_matching_outputs(
+            matches=matches,
+            profiles=matched_profiles,
+            balance=balance,
+            config={
+                "type": "calendar_aligned",
+                "lookback_years": lookback_years,
+                "match_months": match_months,
+                "feature_cols": feature_cols
+            },
+            folder=output_folder
+        )
 
     return {
         "risk_rows": risk_rows,

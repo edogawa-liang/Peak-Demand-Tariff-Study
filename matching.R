@@ -194,10 +194,16 @@ risk_set_matching_peak <- function(
     if(is.null(treated_profile)) next
     
     # Not yet choose tariff or never tariff
+    # controls <- unique(df[
+    #   df[[id_col]]!=treated_id &
+    #     (is.na(df$adoption_month) |
+    #        df$adoption_month>Ti),
+    # ][[id_col]])
+    
+    # Never choose tariff
     controls <- unique(df[
-      df[[id_col]]!=treated_id &
-        (is.na(df$adoption_month) |
-           df$adoption_month>Ti),
+      df[[id_col]] != treated_id &
+        is.na(df$adoption_month),
     ][[id_col]])
     
     control_profiles <- list()

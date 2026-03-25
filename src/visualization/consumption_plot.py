@@ -66,7 +66,7 @@ def plot_consumption(
     title = title_map.get(group_by, "Electricity Consumption")
 
     if exclude_future_tariff:
-        title += " (Control group: Never adopters)"
+        title += " (Control group: Non-adopters)"
 
     # =========================
     # FACET MODE
@@ -131,11 +131,16 @@ def plot_consumption(
             for l in labels:
 
                 if "1" in l:
-                    new_labels.append("Tariff active")
+                    if "has_tariff" in (splits or []):
+                        new_labels.append("Tariff adopters")
+                    else:
+                        new_labels.append("Tariff active")
 
                 elif "0" in l:
-                    if exclude_future_tariff:
-                        new_labels.append("No tariff (Never adopters)")
+                    if "has_tariff" in (splits or []):
+                        new_labels.append("Non-adopters")
+                    elif exclude_future_tariff:
+                        new_labels.append("No tariff (Non-adopters)")
                     else:
                         new_labels.append("No tariff")
 
@@ -179,20 +184,33 @@ def plot_consumption(
 
                 price_label = "Low price period" if parts[0] == "low" else "High price period"
 
-                tariff_label = "Tariff active" if parts[1] == "1" else "No tariff"
+                if "has_tariff" in (splits or []):
+                    tariff_label = "Tariff adopters" if parts[1] == "1" else "Non-adopters"
+                else:
+                    tariff_label = "Tariff active" if parts[1] == "1" else "No tariff"
 
                 new_labels.append(f"{price_label} – {tariff_label}")
 
             # tariff only
             elif parts == ["0"]:
 
-                if exclude_future_tariff:
-                    new_labels.append("No tariff (Never adopters)")
+                if "has_tariff" in (splits or []):
+                    new_labels.append("Non-adopters")
+
+                elif exclude_future_tariff:
+                    new_labels.append("No tariff (Non-adopters)")
+
                 else:
                     new_labels.append("No tariff")
 
+
             elif parts == ["1"]:
-                new_labels.append("Tariff active")
+
+                if "has_tariff" in (splits or []):
+                    new_labels.append("Tariff adopters")
+
+                else:
+                    new_labels.append("Tariff active")
 
             else:
                 new_labels.append(l)
@@ -202,6 +220,31 @@ def plot_consumption(
     plt.xticks(rotation=30)
 
     return ax
+
+def plot_tariff_adoption(
+    df,
+    group_by="month",
+    value_col="top3_mean_consumption",
+    by_price=False,
+    **kwargs
+):
+    data = df.copy()
+
+    data["has_tariff"] = data["tariff_start"].notna().astype(int)
+
+    splits = ["has_tariff"]
+
+    if by_price:
+        splits = ["price", "has_tariff"]
+
+    return plot_consumption(
+        data,
+        group_by=group_by,
+        value_col=value_col,
+        splits=splits,
+        exclude_future_tariff=False,
+        **kwargs
+    )
 
 
 def plot_tariff_adoption_by_usage(

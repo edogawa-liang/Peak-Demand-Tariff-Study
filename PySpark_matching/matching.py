@@ -1242,13 +1242,31 @@ def run_calendar_matching_aligned(
 
 # Double check the matching results
 # post-matching balance check
-def check_balance_auto(
-    res: dict
-):
+def check_balance_full_safe(res: dict):
+    """
+    Comprehensive post-matching balance check.
 
-    print("Rebuilding full profiles...")
+    This function:
+    1. Rebuilds summary covariates (independent of matching features)
+    2. Filters to matched samples only
+    3. Splits variables into:
+        - matching variables (if available in summary space)
+        - non-matching variables (main validation targets)
+    4. Computes and prints balance tables (SMD)
 
-    ALL_VARS = [
+    Notes
+    -----
+    - Designed to work with ANY matching method:
+        * summary matching
+        * time-series matching (lag features)
+        * calendar matching
+    - Prevents errors when matching variables are not in summary space
+    """
+
+    print("Rebuilding summary profiles for validation...")
+
+    # Full set of summary covariates used for validation
+    ALL_SUMMARY_VARS = [
         "peak_mean",
         "peak_sd",
         "peak_volatility",
@@ -1258,33 +1276,68 @@ def check_balance_auto(
         "trend"
     ]
 
-    match_vars = res["match_vars"]   # Auto-detected matching variables (e.g. peak_mean, trend)
+    # Retrieve matching variables from pipeline output
+    match_vars = res.get("match_vars", [])
     risk_rows = res["risk_rows"]
     matches = res["matches"]
 
-    check_vars = [v for v in ALL_VARS if v not in match_vars]
-
-    full_profiles = build_summary_profiles_spark(
+    # ------------------------------------------------------------
+    # Step 1: rebuild summary profiles (independent of matching space)
+    # ------------------------------------------------------------
+    profiles = build_summary_profiles_spark(
         risk_rows,
-        summary_vars=ALL_VARS
+        summary_vars=ALL_SUMMARY_VARS
     )
 
-    print("Filtering matched samples...")
-
-    matched_profiles = build_matched_profiles(full_profiles, matches).cache()
+    # Keep only matched treated/control units
+    matched_profiles = build_matched_profiles(profiles, matches).cache()
 
     print("Matched profiles count =", matched_profiles.count())
 
-    # ===== matching vars =====
-    print("\n=== MATCHING VARIABLES ===")
-    balance_match = balance_table_spark(matched_profiles, match_vars)
-    balance_match.show(50, truncate=False)
+    # ------------------------------------------------------------
+    # Step 2: ensure variables exist (avoid column errors)
+    # ------------------------------------------------------------
+    existing_cols = set(matched_profiles.columns)
+
+    # Matching variables that exist in summary space
+    match_vars_safe = [
+        v for v in match_vars if v in existing_cols
+    ]
+
+    # Non-matching variables (main validation targets)
+    non_match_vars_safe = [
+        v for v in ALL_SUMMARY_VARS
+        if v in existing_cols and v not in match_vars_safe
+    ]
+
+    # ------------------------------------------------------------
+    # Step 3: balance on matching variables (sanity check)
+    # ------------------------------------------------------------
+    if match_vars_safe:
+        print("\n=== MATCHING VARIABLES ===")
+
+        balance_match = balance_table_spark(
+            matched_profiles,
+            match_vars_safe
+        )
+        balance_match.show(50, truncate=False)
+    else:
+        print("\n(No matching variables available in summary space)")
 
     print("\n" + "-" * 50 + "\n")
 
-    # ===== extra vars =====
-    print("=== NON-MATCHING VARIABLES ===")
-    balance_extra = balance_table_spark(matched_profiles, check_vars)
-    balance_extra.show(50, truncate=False)
+    # ------------------------------------------------------------
+    # Step 4: balance on non-matching variables (key validation)
+    # ------------------------------------------------------------
+    if non_match_vars_safe:
+        print("=== NON-MATCHING VARIABLES (MAIN VALIDATION) ===")
 
-    return balance_match, balance_extra
+        balance_extra = balance_table_spark(
+            matched_profiles,
+            non_match_vars_safe
+        )
+        balance_extra.show(50, truncate=False)
+    else:
+        print("All summary variables were used in matching.")
+
+    return

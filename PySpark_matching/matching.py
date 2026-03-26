@@ -777,7 +777,8 @@ def run_summary_matching_pipeline(
         "profiles": profiles_z,
         "matches": matches,
         "matched_profiles": matched_profiles,
-        "balance": balance
+        "balance": balance,
+        "match_vars": summary_vars   # 👈 加這行
     }
 
 
@@ -911,7 +912,8 @@ def run_time_series_matching_pipeline(
         "profiles": profiles_z,
         "matches": matches,
         "matched_profiles": matched_profiles,
-        "balance": balance
+        "balance": balance,
+        "match_vars": feature_cols  
     }
 
 
@@ -1232,63 +1234,57 @@ def run_calendar_matching_aligned(
         "profiles": profiles_z,
         "matches": matches,
         "matched_profiles": matched_profiles,
-        "balance": balance
+        "balance": balance,
+        "match_vars": feature_cols   
     }
 
 
 
 # Double check the matching results
 # post-matching balance check
-def check_balance_on_new_covariates(
-    risk_rows: DataFrame,
-    matches: DataFrame,
-    check_vars: List[str]
-) -> DataFrame:
-    """
-    用「未參與 matching 的 covariates」來做 balance 檢查
+def check_balance_auto(
+    res: dict
+):
 
-    Parameters
-    ----------
-    risk_rows : 原始 risk set（run_* pipeline 的輸出）
-    matches   : matching 結果
-    check_vars: 想檢查的 covariates（例如 ["trend", "variance_consumption"])
+    print("Rebuilding full profiles...")
 
-    Returns
-    -------
-    balance table (Spark DataFrame)
-    """
+    ALL_VARS = [
+        "peak_mean",
+        "peak_sd",
+        "peak_volatility",
+        "mean_consumption",
+        "variance_consumption",
+        "total_consumption",
+        "trend"
+    ]
 
-    print("Rebuilding profiles for balance check...")
+    match_vars = res["match_vars"]   # Auto-detected matching variables (e.g. peak_mean, trend)
+    risk_rows = res["risk_rows"]
+    matches = res["matches"]
 
-    # 重新 build summary profiles（用完整變數池）
+    check_vars = [v for v in ALL_VARS if v not in match_vars]
+
     full_profiles = build_summary_profiles_spark(
         risk_rows,
-        summary_vars=[
-            "peak_mean",
-            "peak_sd",
-            "peak_volatility",
-            "mean_consumption",
-            "variance_consumption",
-            "total_consumption",
-            "trend"
-        ]
+        summary_vars=ALL_VARS
     )
-
-    # 只保留你要檢查的欄位
-    keep_cols = ["Ti", "id", "adoption_month", "group"] + check_vars
-    full_profiles = full_profiles.select(*keep_cols)
 
     print("Filtering matched samples...")
 
-    # 只保留 matched 樣本
     matched_profiles = build_matched_profiles(full_profiles, matches).cache()
 
     print("Matched profiles count =", matched_profiles.count())
 
-    print("Computing balance table...")
+    # ===== matching vars =====
+    print("\n=== MATCHING VARIABLES ===")
+    balance_match = balance_table_spark(matched_profiles, match_vars)
+    balance_match.show(50, truncate=False)
 
-    balance = balance_table_spark(matched_profiles, check_vars)
+    print("\n" + "-" * 50 + "\n")
 
-    balance.show(50, truncate=False)
+    # ===== extra vars =====
+    print("=== NON-MATCHING VARIABLES ===")
+    balance_extra = balance_table_spark(matched_profiles, check_vars)
+    balance_extra.show(50, truncate=False)
 
-    return balance
+    return balance_match, balance_extra

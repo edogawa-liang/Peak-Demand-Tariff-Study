@@ -254,12 +254,11 @@ def build_summary_profiles_spark(
     與你原本邏輯對應：
       - peak_mean
       - peak_sd
+      - peak_volatility
       - mean_consumption
       - variance_consumption
       - total_consumption
       - trend
-
-    peak_volatility 這版也一併做出來，若不用可不選。
     """
     # 先依月排序，做 x 與 lag
     w_order = Window.partitionBy("Ti", "id").orderBy("month")
@@ -1235,3 +1234,61 @@ def run_calendar_matching_aligned(
         "matched_profiles": matched_profiles,
         "balance": balance
     }
+
+
+
+# Double check the matching results
+# post-matching balance check
+def check_balance_on_new_covariates(
+    risk_rows: DataFrame,
+    matches: DataFrame,
+    check_vars: List[str]
+) -> DataFrame:
+    """
+    用「未參與 matching 的 covariates」來做 balance 檢查
+
+    Parameters
+    ----------
+    risk_rows : 原始 risk set（run_* pipeline 的輸出）
+    matches   : matching 結果
+    check_vars: 想檢查的 covariates（例如 ["trend", "variance_consumption"])
+
+    Returns
+    -------
+    balance table (Spark DataFrame)
+    """
+
+    print("Rebuilding profiles for balance check...")
+
+    # 重新 build summary profiles（用完整變數池）
+    full_profiles = build_summary_profiles_spark(
+        risk_rows,
+        summary_vars=[
+            "peak_mean",
+            "peak_sd",
+            "peak_volatility",
+            "mean_consumption",
+            "variance_consumption",
+            "total_consumption",
+            "trend"
+        ]
+    )
+
+    # 只保留你要檢查的欄位
+    keep_cols = ["Ti", "id", "adoption_month", "group"] + check_vars
+    full_profiles = full_profiles.select(*keep_cols)
+
+    print("Filtering matched samples...")
+
+    # 只保留 matched 樣本
+    matched_profiles = build_matched_profiles(full_profiles, matches).cache()
+
+    print("Matched profiles count =", matched_profiles.count())
+
+    print("Computing balance table...")
+
+    balance = balance_table_spark(matched_profiles, check_vars)
+
+    balance.show(50, truncate=False)
+
+    return balance

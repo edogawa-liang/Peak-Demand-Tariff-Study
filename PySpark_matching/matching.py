@@ -48,198 +48,6 @@ def safe_abs_smd(mean_t, mean_c, var_t, var_c):
     return (mean_t - mean_c) / denom
 
 
-# ============================================================
-# Data Preparation
-# ============================================================
-
-def prepare_base_spark(
-    sdf: DataFrame,
-    id_col: str = "aID",
-    month_col: str = "TIDPUNKT",
-    adoption_col: str = "tariff_start",
-    price_col: Optional[str] = "price",
-    price_value: Optional[str] = "all"
-) -> DataFrame:
-    """
-    標準化欄位名稱與型別，保留 matching 需要的欄位。
-    """
-    out = sdf
-
-    if price_col is not None and price_value is not None:
-        if price_col in sdf.columns:
-            out = out.filter(F.col(price_col) == F.lit(price_value))
-
-    out = (
-        out
-        .withColumn("id", F.col(id_col).cast("string"))
-        .withColumn("month", F.to_date(F.col(month_col)))
-        .withColumn("adoption_month", F.to_date(F.col(adoption_col)))
-        .withColumn("top3_mean_consumption", F.col("top3_mean_consumption").cast("double"))
-        .withColumn("mean_consumption", F.col("mean_consumption").cast("double"))
-        .withColumn("variance_consumption", F.col("variance_consumption").cast("double"))
-        .withColumn("total_consumption", F.col("total_consumption").cast("double"))
-        .select(
-            "id",
-            "month",
-            "adoption_month",
-            "top3_mean_consumption",
-            "mean_consumption",
-            "variance_consumption",
-            "total_consumption"
-        )
-        .filter(F.col("id").isNotNull())
-        .filter(F.col("month").isNotNull())
-    )
-
-    return out
-
-
-# ============================================================
-# Cohort / Risk-set construction
-# ============================================================
-
-def get_distinct_ti(
-    base_df: DataFrame,
-    min_ti: Optional[str] = None,
-    max_ti: Optional[str] = None
-) -> DataFrame:
-    """
-    取得所有 adoption cohort 時點 Ti。
-    min_ti / max_ti 可用來限制 cohort 範圍，避免資料膨脹。
-    """
-    ti = (
-        base_df
-        .select(F.col("adoption_month").alias("Ti"))
-        .where(F.col("Ti").isNotNull())
-        .distinct()
-    )
-
-    if min_ti is not None:
-        ti = ti.where(F.col("Ti") >= F.lit(min_ti))
-    if max_ti is not None:
-        ti = ti.where(F.col("Ti") <= F.lit(max_ti))
-
-    return ti
-
-
-def get_user_status(base_df: DataFrame) -> DataFrame:
-    """
-    每位 user 對應一個 adoption_month。
-    若資料中同 id 有多個 adoption_month，取最早非空值。
-    """
-    return (
-        base_df
-        .groupBy("id")
-        .agg(F.min("adoption_month").alias("adoption_month"))
-    )
-
-
-def build_risk_set_rows(
-    base_df: DataFrame,
-    lookback_months: int = 12,
-    min_ti: Optional[str] = None,
-    max_ti: Optional[str] = None,
-    match_months: Optional[List[int]] = None,
-    control_type: str = "never_treated"  
-) -> DataFrame:
-    """
-    產出 risk-set 明細：
-      - 每個 cohort Ti
-      - 每個 user 在 [Ti-lookback, Ti) 的月資料
-      - group = treated / control
-      - treated: adoption_month == Ti
-      - control: adoption_month is null or adoption_month > Ti
-
-    注意：
-    這一步是全流程最容易膨脹的地方。
-    建議搭配 min_ti / max_ti 限縮 cohort 期間。
-    """
-    ti_df = get_distinct_ti(base_df, min_ti=min_ti, max_ti=max_ti)
-    user_status = get_user_status(base_df)
-
-    # 只保留至少在某個 cohort window 內可能用到的資料，減少 cross join 後壓力
-    ti_bounds = ti_df.agg(
-        F.min("Ti").alias("min_Ti"),
-        F.max("Ti").alias("max_Ti")
-    ).first()
-
-    if ti_bounds["min_Ti"] is None or ti_bounds["max_Ti"] is None:
-        return spark.createDataFrame([], schema="""
-            id string,
-            Ti date,
-            adoption_month date,
-            group string,
-            month date,
-            top3_mean_consumption double,
-            mean_consumption double,
-            variance_consumption double,
-            total_consumption double
-        """)
-
-    global_min_month = F.add_months(F.lit(ti_bounds["min_Ti"]), -lookback_months)
-    global_max_month = F.lit(ti_bounds["max_Ti"])
-
-    monthly = (
-        base_df
-        .where(F.col("month") >= global_min_month)
-        .where(F.col("month") < global_max_month)
-        .alias("m")
-    )
-
-    # =========================
-    # control definition
-    # =========================
-    if control_type == "risk_set":
-        cond = (
-            (F.col("u.adoption_month") == F.col("t.Ti")) |
-            (F.col("u.adoption_month").isNull()) |
-            (F.col("u.adoption_month") > F.col("t.Ti"))
-        )
-
-    elif control_type == "never_treated":
-        cond = (
-            (F.col("u.adoption_month") == F.col("t.Ti")) |
-            (F.col("u.adoption_month").isNull())
-        )
-
-    else:
-        raise ValueError("control_type must be 'risk_set' or 'never_treated'")
-
-    # 注意這裡是 Ti 與每月資料的 cross join，再用時間窗過濾
-    risk_rows = (
-        monthly.alias("m")
-        .crossJoin(F.broadcast(ti_df).alias("t"))
-        .join(user_status.alias("u"), on="id", how="inner")
-        .where(
-            (F.col("m.month") < F.col("t.Ti")) &
-            (F.col("m.month") >= F.add_months(F.col("t.Ti"), -lookback_months)) &
-            cond
-        )
-        .withColumn(
-            "group",
-            F.when(F.col("u.adoption_month") == F.col("t.Ti"), F.lit("treated"))
-            .otherwise(F.lit("control"))
-        )
-        .select(
-            F.col("id"),
-            F.col("t.Ti").alias("Ti"),
-            F.col("u.adoption_month").alias("adoption_month"),
-            F.col("group"),
-            F.col("m.month").alias("month"),
-            F.col("m.top3_mean_consumption").alias("top3_mean_consumption"),
-            F.col("m.mean_consumption").alias("mean_consumption"),
-            F.col("m.variance_consumption").alias("variance_consumption"),
-            F.col("m.total_consumption").alias("total_consumption")
-        )
-    )
-    
-    if match_months is not None:
-        risk_rows = risk_rows.where(
-            F.month(F.col("month")).isin(match_months)
-        )
-
-    return risk_rows
-
 
 # ============================================================
 # Profile builders
@@ -328,17 +136,78 @@ def build_summary_profiles_spark(
     return prof.select(*keep_cols)
 
 
+
+# =========== Calendar Vector Matching =========== #
+def build_calendar_aligned_profiles(
+    risk_rows: DataFrame,
+    match_months: List[int],
+    n_years: int = 2
+) -> DataFrame:
+
+    df = (
+        risk_rows
+        .withColumn("year", F.year("month"))
+        .withColumn("month_num", F.month("month"))
+    )
+
+    # 👉 距離 Ti 幾年前
+    df = df.withColumn(
+        "year_diff",
+        F.year("Ti") - F.col("year")
+    )
+
+    # 👉 只保留過去 n_years
+    df = df.where(
+        (F.col("year_diff") >= 1) &
+        (F.col("year_diff") <= n_years)
+    )
+
+    # 👉 只保留指定月份
+    df = df.where(F.col("month_num").isin(match_months))
+
+    # 👉 month number → 字串（jan, feb…）
+    mapping_expr = F.create_map(
+        *[item for i in MONTH_ABB for item in (F.lit(i), F.lit(MONTH_ABB[i]))]
+    )
+
+    df = df.withColumn("month_str", mapping_expr[F.col("month_num")])
+
+    # 👉 feature name（jan_1, jan_2）
+    df = df.withColumn(
+        "feature_name",
+        F.concat(F.col("month_str"), F.lit("_"), F.col("year_diff"))
+    )
+
+    # 👉 pivot 成 wide format
+    prof = (
+        df
+        .groupBy("Ti", "id", "adoption_month", "group")
+        .pivot("feature_name")
+        .agg(F.first("top3_mean_consumption"))
+    )
+
+    return prof
+
+
 def build_time_series_profiles_spark(
     risk_rows: DataFrame,
-    lookback_months: int = 12
+    lookback_months: int = 12,
+    min_valid_dim: int = 10
 ) -> DataFrame:
     """
-    建固定長度的 wide profile：
-      peak_lag_1 ... peak_lag_12
-    其中 lag_1 = Ti 前最近一個月，lag_12 = Ti 前第 12 個月。
+    固定長度 time-series profile（允許 missing）
 
-    這比原本變長 profile 更適合 Spark matching。
+    peak_lag_1 = Ti 前最近一個月
+    peak_lag_12 = Ti 前第12個月
+
+    matching 時：
+    - 允許 missing
+    - 至少需要 min_valid_dim 個有效月
     """
+
+    # ============================================================
+    # Step 1: 建立 lag index（由近到遠）
+    # ============================================================
     w_desc = Window.partitionBy("Ti", "id").orderBy(F.col("month").desc())
 
     tmp = (
@@ -347,6 +216,9 @@ def build_time_series_profiles_spark(
         .where(F.col("lag_idx") <= lookback_months)
     )
 
+    # ============================================================
+    # Step 2: pivot 成 wide format
+    # ============================================================
     prof = (
         tmp
         .groupBy("Ti", "id", "adoption_month", "group")
@@ -354,22 +226,43 @@ def build_time_series_profiles_spark(
         .agg(F.first("top3_mean_consumption"))
     )
 
-    # rename pivot columns
+    # ============================================================
+    # Step 3: rename columns（確保完整 lag 結構）
+    # ============================================================
     for i in range(1, lookback_months + 1):
         if str(i) in prof.columns:
             prof = prof.withColumnRenamed(str(i), f"peak_lag_{i}")
         else:
             prof = prof.withColumn(f"peak_lag_{i}", F.lit(None).cast("double"))
 
-    # 全部 lag 都要有值才進 matching，避免維度不整齊
     lag_cols = [f"peak_lag_{i}" for i in range(1, lookback_months + 1)]
-    cond = None
-    for c in lag_cols:
-        this_cond = F.col(c).isNotNull()
-        cond = this_cond if cond is None else (cond & this_cond)
 
-    prof = prof.where(cond)
-    return prof.select("Ti", "id", "adoption_month", "group", *lag_cols)
+    # ============================================================
+    # Step 4: 計算有效維度（non-missing）
+    # ============================================================
+    valid_expr = None
+    for c in lag_cols:
+        this = F.col(c).isNotNull().cast("int")
+        valid_expr = this if valid_expr is None else (valid_expr + this)
+
+    prof = prof.withColumn("valid_dim", valid_expr)
+
+    # ============================================================
+    # Step 5: 篩選有效樣本
+    # ============================================================
+    prof = prof.where(F.col("valid_dim") >= min_valid_dim)
+
+    # ============================================================
+    # Step 6: 回傳（保留 valid_dim）
+    # ============================================================
+    return prof.select(
+        "Ti",
+        "id",
+        "adoption_month",
+        "group",
+        *lag_cols,
+        "valid_dim"
+    )
 
 
 # ============================================================
@@ -647,7 +540,6 @@ def save_matching_outputs(
 # ============================================================
 
 def run_summary_matching_pipeline(
-    sdf: DataFrame,
     output_folder: str,
     id_col: str = "aID",
     month_col: str = "TIDPUNKT",
@@ -664,36 +556,15 @@ def run_summary_matching_pipeline(
     verbose: bool = True,
     match_months: Optional[List[int]] = None,
     save_output: bool = False,
-    control_type: str = "never_treated" 
+    control_type: str = "never_treated",
+    risk_rows: DataFrame = None
 ) -> Dict[str, DataFrame]:
 
+    if risk_rows is None:
+        raise ValueError("risk_rows must be provided. Use prepare_matching_data first.")
+    
     if summary_vars is None:
         summary_vars = ["peak_mean", "mean_consumption", "peak_sd", "trend"]
-
-    if verbose:
-        print("Preparing base dataframe ...")
-    base = prepare_base_spark(
-        sdf=sdf,
-        id_col=id_col,
-        month_col=month_col,
-        adoption_col=adoption_col,
-        price_col=price_col,
-        price_value=price_value
-    )
-
-    if verbose:
-        print("Building risk set rows ...")
-    risk_rows = build_risk_set_rows(
-        base,
-        lookback_months=lookback_months,
-        min_ti=min_ti,
-        max_ti=max_ti,
-        match_months=match_months,
-        control_type=control_type
-    )
-    if repartition_by_ti:
-        risk_rows = risk_rows.repartition("Ti")
-    risk_rows = risk_rows.cache()
 
     if verbose:
         print("risk_rows count =", risk_rows.count())
@@ -701,6 +572,8 @@ def run_summary_matching_pipeline(
 
     if verbose:
         print("Building summary profiles ...")
+
+
     profiles = build_summary_profiles_spark(risk_rows, summary_vars=summary_vars)
     if repartition_by_ti:
         profiles = profiles.repartition("Ti")
@@ -783,7 +656,6 @@ def run_summary_matching_pipeline(
 
 
 def run_time_series_matching_pipeline(
-    sdf: DataFrame,
     output_folder: str,
     id_col: str = "aID",
     month_col: str = "TIDPUNKT",
@@ -798,35 +670,14 @@ def run_time_series_matching_pipeline(
     verbose: bool = True,
     match_months: Optional[List[int]] = None,
     save_output: bool = False,
-    control_type: str = "never_treated" 
+    control_type: str = "never_treated",
+    risk_rows: DataFrame = None
 ) -> Dict[str, DataFrame]:
 
     feature_cols = [f"peak_lag_{i}" for i in range(1, lookback_months + 1)]
 
-    if verbose:
-        print("Preparing base dataframe ...")
-    base = prepare_base_spark(
-        sdf=sdf,
-        id_col=id_col,
-        month_col=month_col,
-        adoption_col=adoption_col,
-        price_col=price_col,
-        price_value=price_value
-    )
-
-    if verbose:
-        print("Building risk set rows ...")
-    risk_rows = build_risk_set_rows(
-        base,
-        lookback_months=lookback_months,
-        min_ti=min_ti,
-        max_ti=max_ti,
-        match_months=match_months,
-        control_type=control_type
-    )
-    if repartition_by_ti:
-        risk_rows = risk_rows.repartition("Ti")
-    risk_rows = risk_rows.cache()
+    if risk_rows is None:
+        raise ValueError("risk_rows must be provided.")
 
     if verbose:
         print("risk_rows count =", risk_rows.count())
@@ -857,14 +708,22 @@ def run_time_series_matching_pipeline(
 
     if verbose:
         print("Matching top-k ...")
+
     # time series 沒有 peak_mean，因此不做 peak blocking
-    matches = match_topk_spark(
-        profiles_z=profiles_z,
-        feature_cols=feature_cols,
-        k_neighbors=k_neighbors,
-        blocking_threshold=0.3,
-        use_peak_blocking=False
-    )
+    # matches = match_topk_spark(
+    #     profiles_z=profiles_z,
+    #     feature_cols=feature_cols,
+    #     k_neighbors=k_neighbors,
+    #     blocking_threshold=0.3,
+    #     use_peak_blocking=False
+    # )
+
+    matches = match_topk_allow_missing(
+    profiles_z,
+    feature_cols,
+    k_neighbors=k_neighbors,
+    min_valid_dim=10
+)
     if repartition_by_ti:
         matches = matches.repartition("adoption_month")
     matches = matches.cache()
@@ -889,6 +748,7 @@ def run_time_series_matching_pipeline(
 
     if verbose:
         print("Saving outputs ...")
+
 
     if save_output:
         save_matching_outputs(
@@ -959,64 +819,14 @@ def save_matching_results_fabric(
 
 
 
-    # =========== Calendar Vector Matching =========== #
-# =========== Calendar Vector Matching =========== #
-def build_calendar_aligned_profiles(
-    risk_rows: DataFrame,
-    match_months: List[int],
-    n_years: int = 2
-) -> DataFrame:
-
-    df = (
-        risk_rows
-        .withColumn("year", F.year("month"))
-        .withColumn("month_num", F.month("month"))
-    )
-
-    # 👉 距離 Ti 幾年前
-    df = df.withColumn(
-        "year_diff",
-        F.year("Ti") - F.col("year")
-    )
-
-    # 👉 只保留過去 n_years
-    df = df.where(
-        (F.col("year_diff") >= 1) &
-        (F.col("year_diff") <= n_years)
-    )
-
-    # 👉 只保留指定月份
-    df = df.where(F.col("month_num").isin(match_months))
-
-    # 👉 month number → 字串（jan, feb…）
-    mapping_expr = F.create_map(
-        *[item for i in MONTH_ABB for item in (F.lit(i), F.lit(MONTH_ABB[i]))]
-    )
-
-    df = df.withColumn("month_str", mapping_expr[F.col("month_num")])
-
-    # 👉 feature name（jan_1, jan_2）
-    df = df.withColumn(
-        "feature_name",
-        F.concat(F.col("month_str"), F.lit("_"), F.col("year_diff"))
-    )
-
-    # 👉 pivot 成 wide format
-    prof = (
-        df
-        .groupBy("Ti", "id", "adoption_month", "group")
-        .pivot("feature_name")
-        .agg(F.first("top3_mean_consumption"))
-    )
-
-    return prof
-
 
 
 def match_topk_allow_missing(
     profiles_z: DataFrame,
     feature_cols: List[str],
-    k_neighbors: int = 5
+    k_neighbors: int = 5,
+    min_valid_dim: int = 6,      # 👈 新增
+    verbose: bool = True         # 👈 新增
 ) -> DataFrame:
 
     treated = profiles_z.where(F.col("group") == "treated").alias("t")
@@ -1046,13 +856,37 @@ def match_topk_allow_missing(
         dist_expr = diff_sq if dist_expr is None else dist_expr + diff_sq
         valid_count = count if valid_count is None else valid_count + count
 
-    cand = (
-        cand
-        .withColumn("valid_dim", valid_count)
-        .withColumn("distance", F.sqrt(dist_expr))
-        .where(F.col("valid_dim") > 0)
+    cand = cand.withColumn("valid_dim", valid_count)
+
+    # ============================================================
+    # 🔥 印出維度分布（很重要）
+    # ============================================================
+    if verbose:
+        print("=== VALID DIMENSION DISTRIBUTION ===")
+        (
+            cand
+            .groupBy("valid_dim")
+            .count()
+            .orderBy("valid_dim")
+            .show(50, truncate=False)
+        )
+
+    # ============================================================
+    # 🔥 篩選至少 min_valid_dim 維
+    # ============================================================
+    cand = cand.where(F.col("valid_dim") >= min_valid_dim)
+
+    # ============================================================
+    # 🔥 用「平均距離」
+    # ============================================================
+    cand = cand.withColumn(
+        "distance",
+        F.sqrt(dist_expr / F.col("valid_dim"))
     )
 
+    # ============================================================
+    # matching
+    # ============================================================
     w = Window.partitionBy(F.col("t.Ti"), F.col("t.id")) \
               .orderBy(F.col("distance"), F.col("c.id"))
 
@@ -1074,7 +908,6 @@ def match_topk_allow_missing(
 
 
 def run_calendar_matching_aligned(
-    sdf: DataFrame,
     output_folder: str,
     id_col: str = "aID",
     month_col: str = "TIDPUNKT",
@@ -1087,44 +920,15 @@ def run_calendar_matching_aligned(
     repartition_by_ti: bool = True,
     verbose: bool = True,
     save_output: bool = False,
-    control_type: str = "never_treated"
+    control_type: str = "never_treated",
+    risk_rows = None,
 ) -> Dict[str, DataFrame]:
 
     if verbose:
         print("Running calendar-aligned matching...")
 
-    # ============================================================
-    # base
-    # ============================================================
-    if verbose:
-        print("Preparing base dataframe ...")
-
-    base = prepare_base_spark(
-        sdf=sdf,
-        id_col=id_col,
-        month_col=month_col,
-        adoption_col=adoption_col,
-        price_col=price_col,
-        price_value=price_value
-    )
-
-    # ============================================================
-    # risk set
-    # ============================================================
-    if verbose:
-        print("Building risk set rows ...")
-
-    risk_rows = build_risk_set_rows(
-        base,
-        lookback_months=lookback_years * 12,
-        match_months=match_months,
-        control_type=control_type
-    )
-
-    if repartition_by_ti:
-        risk_rows = risk_rows.repartition("Ti")
-
-    risk_rows = risk_rows.cache()
+    if risk_rows is None:
+        raise ValueError("risk_rows must be provided.")
 
     if verbose:
         print("risk_rows count =", risk_rows.count())
@@ -1141,11 +945,10 @@ def run_calendar_matching_aligned(
         match_months=match_months,
         n_years=lookback_years
     )
-
-    feature_cols = [
+    feature_cols = sorted([
         c for c in profiles.columns
         if c not in ["Ti", "id", "adoption_month", "group"]
-    ]
+    ])
 
     if repartition_by_ti:
         profiles = profiles.repartition("Ti")
@@ -1180,7 +983,8 @@ def run_calendar_matching_aligned(
     matches = match_topk_allow_missing(
         profiles_z,
         feature_cols,
-        k_neighbors=k_neighbors
+        k_neighbors=k_neighbors,
+        min_valid_dim=6
     )
 
     matches = matches.cache()
@@ -1240,104 +1044,3 @@ def run_calendar_matching_aligned(
 
 
 
-# Double check the matching results
-# post-matching balance check
-def check_balance_full_safe(res: dict):
-    """
-    Comprehensive post-matching balance check.
-
-    This function:
-    1. Rebuilds summary covariates (independent of matching features)
-    2. Filters to matched samples only
-    3. Splits variables into:
-        - matching variables (if available in summary space)
-        - non-matching variables (main validation targets)
-    4. Computes and prints balance tables (SMD)
-
-    Notes
-    -----
-    - Designed to work with ANY matching method:
-        * summary matching
-        * time-series matching (lag features)
-        * calendar matching
-    - Prevents errors when matching variables are not in summary space
-    """
-
-    print("Rebuilding summary profiles for validation...")
-
-    # Full set of summary covariates used for validation
-    ALL_SUMMARY_VARS = [
-        "peak_mean",
-        "peak_sd",
-        "peak_volatility",
-        "mean_consumption",
-        "variance_consumption",
-        "total_consumption",
-        "trend"
-    ]
-
-    # Retrieve matching variables from pipeline output
-    match_vars = res.get("match_vars", [])
-    risk_rows = res["risk_rows"]
-    matches = res["matches"]
-
-    # ------------------------------------------------------------
-    # Step 1: rebuild summary profiles (independent of matching space)
-    # ------------------------------------------------------------
-    profiles = build_summary_profiles_spark(
-        risk_rows,
-        summary_vars=ALL_SUMMARY_VARS
-    )
-
-    # Keep only matched treated/control units
-    matched_profiles = build_matched_profiles(profiles, matches).cache()
-
-    print("Matched profiles count =", matched_profiles.count())
-
-    # ------------------------------------------------------------
-    # Step 2: ensure variables exist (avoid column errors)
-    # ------------------------------------------------------------
-    existing_cols = set(matched_profiles.columns)
-
-    # Matching variables that exist in summary space
-    match_vars_safe = [
-        v for v in match_vars if v in existing_cols
-    ]
-
-    # Non-matching variables (main validation targets)
-    non_match_vars_safe = [
-        v for v in ALL_SUMMARY_VARS
-        if v in existing_cols and v not in match_vars_safe
-    ]
-
-    # ------------------------------------------------------------
-    # Step 3: balance on matching variables (sanity check)
-    # ------------------------------------------------------------
-    if match_vars_safe:
-        print("\n=== MATCHING VARIABLES ===")
-
-        balance_match = balance_table_spark(
-            matched_profiles,
-            match_vars_safe
-        )
-        balance_match.show(50, truncate=False)
-    else:
-        print("\n(No matching variables available in summary space)")
-
-    print("\n" + "-" * 50 + "\n")
-
-    # ------------------------------------------------------------
-    # Step 4: balance on non-matching variables (key validation)
-    # ------------------------------------------------------------
-    if non_match_vars_safe:
-        print("=== NON-MATCHING VARIABLES (MAIN VALIDATION) ===")
-
-        balance_extra = balance_table_spark(
-            matched_profiles,
-            non_match_vars_safe
-        )
-        balance_extra.show(50, truncate=False)
-    else:
-        print("All summary variables were used in matching.")
-
-    return

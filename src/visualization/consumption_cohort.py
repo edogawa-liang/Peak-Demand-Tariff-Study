@@ -159,25 +159,41 @@ def plot_multiple_cohorts(
 
 def plot_cohort_panels(
     df,
-    cohort_months,   # list，Ex: ["2024-03","2024-04",...]
+    cohort_months,
     time_col="TIDPUNKT",
     value_col="top3_mean_consumption",
+    mode="raw",   # "raw" or "matched"
     ncols=3,
     figsize=(15,10),
     dpi=120
 ):
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import math
+    from matplotlib.lines import Line2D
+
     data = df.copy()
 
     # -------------------------
-    # preprocess time variables
+    # preprocess
     # -------------------------
     data[time_col] = pd.to_datetime(data[time_col]).dt.to_period("M")
     data["tariff_month"] = pd.to_datetime(data["tariff_start"]).dt.to_period("M")
 
+    if mode == "matched":
+        data["cohort"] = pd.to_datetime(data["cohort"].astype(str)).dt.to_period("M")
+
     cohort_months = [pd.Period(m, freq="M") for m in cohort_months]
 
+    # 固定顏色
+    color_map = {
+        "control": "tab:blue",
+        "treated": "tab:orange"
+    }
+
     # -------------------------
-    # subplot layout
+    # layout
     # -------------------------
     n = len(cohort_months)
     nrows = math.ceil(n / ncols)
@@ -190,25 +206,46 @@ def plot_cohort_panels(
         sharey=True
     )
 
+    if n == 1:
+        axes = np.array([axes])
     axes = axes.flatten()
 
     # -------------------------
-    #  loop through cohorts
+    # loop cohorts
     # -------------------------
     for i, cohort_month in enumerate(cohort_months):
 
         ax = axes[i]
 
-        treated = data[data["tariff_month"] == cohort_month]
-        control = data[data["tariff_month"].isna()]
+        if mode == "raw":
+            treated = data[data["tariff_month"] == cohort_month]
+            control = data[data["tariff_month"].isna()]
 
-        d = pd.concat([treated, control]).copy()
+            d = pd.concat([treated, control]).copy()
 
-        d["group"] = d["tariff_month"].apply(
-            lambda x: "treated" if x == cohort_month else "control"
-        )
+            d["group"] = np.where(
+                d["tariff_month"] == cohort_month,
+                "treated",
+                "control"
+            )
 
-        # --- aggregation ---
+        elif mode == "matched":
+            d = data[data["cohort"] == cohort_month].copy()
+
+            d["group"] = d["treatment"].map({
+                1: "treated",
+                0: "control"
+            })
+
+        else:
+            raise ValueError("mode must be 'raw' or 'matched'")
+
+        # drop NA group
+        d = d[d["group"].notna()]
+
+        # -------------------------
+        # aggregation
+        # -------------------------
         g = (
             d.groupby([time_col, "group"])[value_col]
             .mean()
@@ -216,10 +253,29 @@ def plot_cohort_panels(
             .sort_index()
         )
 
-        # --- plot ---
-        g.plot(ax=ax, marker="o")
+        # 固定欄位順序
+        g = g.reindex(columns=["control", "treated"])
 
-        ax.axvline(cohort_month, linestyle="--", color="black", alpha=0.5)
+        # -------------------------
+        # plot（逐條畫 → 保證顏色）
+        # -------------------------
+        for grp in ["control", "treated"]:
+            if grp in g.columns and g[grp].notna().any():
+                ax.plot(
+                    g.index.to_timestamp(),
+                    g[grp],
+                    marker="o",
+                    color=color_map[grp],
+                    linewidth=2
+                )
+
+        # adoption line
+        ax.axvline(
+            cohort_month.to_timestamp(),
+            linestyle="--",
+            color="black",
+            alpha=0.6
+        )
 
         ax.set_title(cohort_month.strftime("%b %Y") + " adopters")
 
@@ -228,27 +284,38 @@ def plot_cohort_panels(
 
         ax.tick_params(axis="x", rotation=45)
 
-        if ax.get_legend():
-            ax.get_legend().remove()
-
     # -------------------------
-    # clear subplot
+    # remove empty panels
     # -------------------------
-    for j in range(i+1, len(axes)):
+    for j in range(i + 1, len(axes)):
         fig.delaxes(axes[j])
 
     # -------------------------
-    # legend
+    # legend（🔥 完全正確寫法）
     # -------------------------
-    handles, labels = ax.get_legend_handles_labels()
-    new_labels = [
-        "Tariff adopters" if l == "treated" else "Non-adopters"
-        for l in labels
-    ]
+    if mode == "raw":
+        legend_handles = [
+            Line2D([0], [0], color="tab:blue", marker="o", label="Never adopters"),
+            Line2D([0], [0], color="tab:orange", marker="o", label="Tariff adopters"),
+        ]
+        title = "Before Matching"
 
-    fig.legend(handles, new_labels, loc="upper right")
+    else:
+        legend_handles = [
+            Line2D([0], [0], color="tab:blue", marker="o", label="Matched controls"),
+            Line2D([0], [0], color="tab:orange", marker="o", label="Tariff adopters"),
+        ]
+        title = "After Matching"
 
-    fig.suptitle("Average Peak Consumption of Households by Tariff Adoption Month", fontsize=16)
+    fig.legend(
+        handles=legend_handles,
+        loc="upper right"
+    )
+
+    fig.suptitle(
+        f"Average Peak Consumption by Cohort ({title})",
+        fontsize=16
+    )
 
     plt.tight_layout()
 

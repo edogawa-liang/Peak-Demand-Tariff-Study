@@ -1,0 +1,11 @@
+base = prepare_base_spark(month_result_spark)
+
+# 看 control 有多少人
+base.where(F.col("adoption_month").isNull()).count()
+
+# 但看這些 control 有沒有足夠歷史
+base.where(F.col("adoption_month").isNull()) \
+    .groupBy("id") \
+    .agg(F.countDistinct("month").alias("n_months")) \
+    .orderBy("n_months") \
+    .show(20)

@@ -192,7 +192,7 @@ def build_calendar_aligned_profiles(
 def build_time_series_profiles_spark(
     risk_rows: DataFrame,
     lookback_months: int = 12,
-    min_valid_dim: int = 10
+    min_valid_dim: int = None
 ) -> DataFrame:
     """
     固定長度 time-series profile（允許 missing）
@@ -250,8 +250,8 @@ def build_time_series_profiles_spark(
     # ============================================================
     # Step 5: 篩選有效樣本
     # ============================================================
-    prof = prof.where(F.col("valid_dim") >= min_valid_dim)
-
+    if min_valid_dim is not None:
+        prof = prof.where(F.col("valid_dim") >= min_valid_dim)
     # ============================================================
     # Step 6: 回傳（保留 valid_dim）
     # ============================================================
@@ -671,7 +671,7 @@ def run_summary_matching_pipeline(
         save_matching_outputs(
             matches=matches,
             profiles=matched_profiles,
-            balance=balance,
+            balance=balance_overall,
             config={
                 "type": "summary",
                 "lookback_months": lookback_months,
@@ -758,7 +758,7 @@ def run_time_series_matching_pipeline(
     profiles_z,
     feature_cols,
     k_neighbors=k_neighbors,
-    min_valid_dim=10
+    min_valid_dim=None
 )
     if repartition_by_ti:
         matches = matches.repartition("adoption_month")
@@ -886,7 +886,7 @@ def match_topk_allow_missing(
 
     if min_valid_dim is None:
         # 至少一半，但不要太低
-        min_valid_dim = max(2, int(max_dim * 0.5))
+        min_valid_dim = max(2, int(max_dim * 0.3))
 
     if verbose:
         print(f"[INFO] feature dim = {max_dim}, min_valid_dim = {min_valid_dim}")
@@ -1047,7 +1047,7 @@ def run_calendar_matching_aligned(
         profiles_z,
         feature_cols,
         k_neighbors=k_neighbors,
-        min_valid_dim=6
+        min_valid_dim=None
     )
 
     matches = matches.cache()

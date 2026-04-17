@@ -419,53 +419,86 @@ def build_matched_profiles(
 
 def balance_table_spark(
     profiles: DataFrame,
-    feature_cols: List[str]
+    feature_cols: List[str],
+    pool: bool = True   # 👈 新增
 ) -> DataFrame:
-    """
-    產出 balance table:
-      covariate / treated_mean / control_mean / SMD
-    """
-    treated = profiles.where(F.col("group") == "treated")
-    control = profiles.where(F.col("group") == "control")
 
-    t_agg = treated.agg(*(
-        [F.avg(c).alias(f"{c}_t_mean") for c in feature_cols] +
-        [F.var_samp(c).alias(f"{c}_t_var") for c in feature_cols]
-    ))
+    if not pool:
+        # ====================================================
+        # 🔥 BY Ti（最重要）
+        # ====================================================
+        treated = profiles.where(F.col("group") == "treated")
+        control = profiles.where(F.col("group") == "control")
 
-    c_agg = control.agg(*(
-        [F.avg(c).alias(f"{c}_c_mean") for c in feature_cols] +
-        [F.var_samp(c).alias(f"{c}_c_var") for c in feature_cols]
-    ))
+        t_agg = treated.groupBy("Ti").agg(*(
+            [F.avg(c).alias(f"{c}_t_mean") for c in feature_cols] +
+            [F.var_samp(c).alias(f"{c}_t_var") for c in feature_cols]
+        ))
 
-    row = t_agg.crossJoin(c_agg)
+        c_agg = control.groupBy("Ti").agg(*(
+            [F.avg(c).alias(f"{c}_c_mean") for c in feature_cols] +
+            [F.var_samp(c).alias(f"{c}_c_var") for c in feature_cols]
+        ))
 
-    pieces = []
-    for c in feature_cols:
-        piece = row.select(
-            F.lit(c).alias("covariate"),
-            F.col(f"{c}_t_mean").alias("treated_mean"),
-            F.col(f"{c}_c_mean").alias("control_mean"),
-            (
-                (F.col(f"{c}_t_mean") - F.col(f"{c}_c_mean")) /
-                F.sqrt((F.col(f"{c}_t_var") + F.col(f"{c}_c_var")) / 2.0)
-            ).alias("SMD")
-        )
-        pieces.append(piece)
+        row = t_agg.join(c_agg, on="Ti")
 
-    if not pieces:
-        return spark.createDataFrame([], schema="""
-            covariate string,
-            treated_mean double,
-            control_mean double,
-            SMD double
-        """)
+        pieces = []
+        for c in feature_cols:
+            piece = row.select(
+                "Ti",
+                F.lit(c).alias("covariate"),
+                F.col(f"{c}_t_mean").alias("treated_mean"),
+                F.col(f"{c}_c_mean").alias("control_mean"),
+                (
+                    (F.col(f"{c}_t_mean") - F.col(f"{c}_c_mean")) /
+                    F.sqrt((F.col(f"{c}_t_var") + F.col(f"{c}_c_var")) / 2.0)
+                ).alias("SMD")
+            )
+            pieces.append(piece)
 
-    out = pieces[0]
-    for p in pieces[1:]:
-        out = out.unionByName(p)
+        out = pieces[0]
+        for p in pieces[1:]:
+            out = out.unionByName(p)
 
-    return out
+        return out
+
+    else:
+        # ====================================================
+        # 🔥 OVERALL（你原本的）
+        # ====================================================
+        treated = profiles.where(F.col("group") == "treated")
+        control = profiles.where(F.col("group") == "control")
+
+        t_agg = treated.agg(*(
+            [F.avg(c).alias(f"{c}_t_mean") for c in feature_cols] +
+            [F.var_samp(c).alias(f"{c}_t_var") for c in feature_cols]
+        ))
+
+        c_agg = control.agg(*(
+            [F.avg(c).alias(f"{c}_c_mean") for c in feature_cols] +
+            [F.var_samp(c).alias(f"{c}_c_var") for c in feature_cols]
+        ))
+
+        row = t_agg.crossJoin(c_agg)
+
+        pieces = []
+        for c in feature_cols:
+            piece = row.select(
+                F.lit(c).alias("covariate"),
+                F.col(f"{c}_t_mean").alias("treated_mean"),
+                F.col(f"{c}_c_mean").alias("control_mean"),
+                (
+                    (F.col(f"{c}_t_mean") - F.col(f"{c}_c_mean")) /
+                    F.sqrt((F.col(f"{c}_t_var") + F.col(f"{c}_c_var")) / 2.0)
+                ).alias("SMD")
+            )
+            pieces.append(piece)
+
+        out = pieces[0]
+        for p in pieces[1:]:
+            out = out.unionByName(p)
+
+        return out
 
 
 # ============================================================
@@ -618,7 +651,19 @@ def run_summary_matching_pipeline(
 
     if verbose:
         print("Computing balance table ...")
-    balance = balance_table_spark(matched_profiles, summary_vars).cache()
+
+    # balance = balance_table_spark(matched_profiles, summary_vars).cache()
+    balance_overall = balance_table_spark(
+    matched_profiles,
+    summary_vars,
+    pool=True
+    )
+
+    balance_by_ti = balance_table_spark(
+        matched_profiles,
+        summary_vars,
+        pool=False
+    )
 
     if verbose:
         print("balance count =", balance.count())
@@ -650,8 +695,9 @@ def run_summary_matching_pipeline(
         "profiles": profiles_z,
         "matches": matches,
         "matched_profiles": matched_profiles,
-        "balance": balance,
-        "match_vars": summary_vars   # 👈 加這行
+        "balance": balance_overall,        
+        "balance_by_ti": balance_by_ti,   
+        "match_vars": summary_vars
     }
 
 

@@ -875,10 +875,25 @@ def match_topk_allow_missing(
     profiles_z: DataFrame,
     feature_cols: List[str],
     k_neighbors: int = 5,
-    min_valid_dim: int = 6,      # 👈 新增
-    verbose: bool = True         # 👈 新增
+    min_valid_dim: Optional[int] = None,   # 👈 改成可自動
+    verbose: bool = True
 ) -> DataFrame:
 
+    # ============================================================
+    # 🔥 自動決定 min_valid_dim
+    # ============================================================
+    max_dim = len(feature_cols)
+
+    if min_valid_dim is None:
+        # 至少一半，但不要太低
+        min_valid_dim = max(2, int(max_dim * 0.5))
+
+    if verbose:
+        print(f"[INFO] feature dim = {max_dim}, min_valid_dim = {min_valid_dim}")
+
+    # ============================================================
+    # split treated / control
+    # ============================================================
     treated = profiles_z.where(F.col("group") == "treated").alias("t")
     control = profiles_z.where(F.col("group") == "control").alias("c")
 
@@ -887,6 +902,9 @@ def match_topk_allow_missing(
         .where(F.col("t.id") != F.col("c.id"))
     )
 
+    # ============================================================
+    # distance + valid_dim
+    # ============================================================
     dist_expr = None
     valid_count = None
 
@@ -909,7 +927,7 @@ def match_topk_allow_missing(
     cand = cand.withColumn("valid_dim", valid_count)
 
     # ============================================================
-    # 🔥 印出維度分布（很重要）
+    # 🔥 印出維度分布（debug用）
     # ============================================================
     if verbose:
         print("=== VALID DIMENSION DISTRIBUTION ===")
@@ -922,12 +940,12 @@ def match_topk_allow_missing(
         )
 
     # ============================================================
-    # 🔥 篩選至少 min_valid_dim 維
+    # 🔥 篩選（用自動門檻）
     # ============================================================
     cand = cand.where(F.col("valid_dim") >= min_valid_dim)
 
     # ============================================================
-    # 🔥 用「平均距離」
+    # 🔥 平均距離（避免維度偏差）
     # ============================================================
     cand = cand.withColumn(
         "distance",

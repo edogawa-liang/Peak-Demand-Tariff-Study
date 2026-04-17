@@ -574,11 +574,6 @@ def save_matching_outputs(
 
 def run_summary_matching_pipeline(
     output_folder: str,
-    id_col: str = "aID",
-    month_col: str = "TIDPUNKT",
-    adoption_col: str = "tariff_start",
-    price_col: Optional[str] = "price",
-    price_value: Optional[str] = "all",
     lookback_months: int = 12,
     k_neighbors: int = 5,
     blocking_threshold: float = 0.3,
@@ -658,7 +653,6 @@ def run_summary_matching_pipeline(
     summary_vars,
     pool=True
     )
-
     balance_by_ti = balance_table_spark(
         matched_profiles,
         summary_vars,
@@ -666,8 +660,9 @@ def run_summary_matching_pipeline(
     )
 
     if verbose:
-        print("balance count =", balance.count())
-        balance.show(50, truncate=False)
+        print("balance_overall count =", balance_overall.count())
+        balance_overall.show(50, truncate=False)
+        balance_by_ti.show(50, truncate=False)
 
     if verbose:
         print("Saving outputs ...")
@@ -703,11 +698,6 @@ def run_summary_matching_pipeline(
 
 def run_time_series_matching_pipeline(
     output_folder: str,
-    id_col: str = "aID",
-    month_col: str = "TIDPUNKT",
-    adoption_col: str = "tariff_start",
-    price_col: Optional[str] = "price",
-    price_value: Optional[str] = "all",
     lookback_months: int = 12,
     k_neighbors: int = 5,
     min_ti: Optional[str] = None,
@@ -786,11 +776,24 @@ def run_time_series_matching_pipeline(
 
     if verbose:
         print("Computing balance table ...")
-    balance = balance_table_spark(matched_profiles, feature_cols).cache()
+
+    balance_overall = balance_table_spark(
+    matched_profiles,
+    feature_cols,
+    pool=True
+    ).cache()
+
+    balance_by_ti = balance_table_spark(
+        matched_profiles,
+        feature_cols,
+        pool=False
+    ).cache()
 
     if verbose:
-        print("balance count =", balance.count())
-        balance.show(50, truncate=False)
+        print("balance_overall count =", balance_overall.count())
+        balance_overall.show(50, truncate=False)
+        print("balance_by_ti count =", balance_by_ti.count())
+        balance_by_ti.show(50, truncate=False)
 
     if verbose:
         print("Saving outputs ...")
@@ -800,7 +803,7 @@ def run_time_series_matching_pipeline(
         save_matching_outputs(
             matches=matches,
             profiles=matched_profiles,
-            balance=balance,
+            balance=balance_overall,
             config={
                 "type": "time_series_fixed_lag",
                 "lookback_months": lookback_months,
@@ -818,7 +821,8 @@ def run_time_series_matching_pipeline(
         "profiles": profiles_z,
         "matches": matches,
         "matched_profiles": matched_profiles,
-        "balance": balance,
+        "balance": balance_overall,
+        "balance_by_ti": balance_by_ti,
         "match_vars": feature_cols  
     }
 
@@ -955,11 +959,6 @@ def match_topk_allow_missing(
 
 def run_calendar_matching_aligned(
     output_folder: str,
-    id_col: str = "aID",
-    month_col: str = "TIDPUNKT",
-    adoption_col: str = "tariff_start",
-    price_col: Optional[str] = "price",
-    price_value: Optional[str] = "all",
     lookback_years: int = 2,
     match_months: List[int] = [1,2,3,11,12],
     k_neighbors: int = 5,
@@ -1052,11 +1051,23 @@ def run_calendar_matching_aligned(
     if verbose:
         print("Computing balance table ...")
 
-    balance = balance_table_spark(matched_profiles, feature_cols).cache()
+    balance_overall = balance_table_spark(
+    matched_profiles,
+    feature_cols,
+    pool=True
+    ).cache()
 
+    balance_by_ti = balance_table_spark(
+        matched_profiles,
+        feature_cols,
+        pool=False
+    ).cache()
+    
     if verbose:
-        print("balance count =", balance.count())
-        balance.show(50, truncate=False)
+        print("balance_overall count =", balance_overall.count())
+        balance_overall.show(50, truncate=False)
+        print("balance_by_ti count =", balance_by_ti.count())
+        balance_by_ti.show(50, truncate=False)
 
     # ============================================================
     # save
@@ -1068,7 +1079,7 @@ def run_calendar_matching_aligned(
         save_matching_outputs(
             matches=matches,
             profiles=matched_profiles,
-            balance=balance,
+            balance=balance_overall,
             config={
                 "type": "calendar_aligned",
                 "lookback_years": lookback_years,
@@ -1084,7 +1095,8 @@ def run_calendar_matching_aligned(
         "profiles": profiles_z,
         "matches": matches,
         "matched_profiles": matched_profiles,
-        "balance": balance,
+        "balance": balance_overall,
+        "balance_by_ti": balance_by_ti,
         "match_vars": feature_cols   
     }
 

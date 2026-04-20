@@ -11,3 +11,22 @@ df[outcome_col] = pd.to_numeric(df[outcome_col], errors="coerce")
 
     print("\n=== COHORT TABLE ===")
     print(cohort_df.head())
+
+
+
+        # ✅ 加這行（核心🔥）
+        p_value = 2 * (1 - norm.cdf(abs(t_stat))) if not np.isnan(t_stat) else np.nan
+
+        results.append({
+            "event_time": t,
+            "mean_treated": mean_t,
+            "mean_control": mean_c,
+            "effect": effect,
+            "se": se,
+            "t_stat": t_stat,
+            "p_value": p_value,
+            "n_treated": n_t,
+            "n_control": n_c
+        })
+
+    return pd.DataFrame(results)

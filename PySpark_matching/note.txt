@@ -1,3 +1,6 @@
 print(df["top3_mean_consumption"].dtype)
 print(df["top3_mean_consumption"].map(type).value_counts().head(20))
 print(df["top3_mean_consumption"].head(10).tolist())
+
+
+df[outcome_col] = pd.to_numeric(df[outcome_col], errors="coerce")
